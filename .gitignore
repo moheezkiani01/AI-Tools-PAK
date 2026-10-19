@@ -1,0 +1,32 @@
+# Installed packages and generated files
+node_modules/
+**/node_modules/
+dist/
+screen-test-results/
+playwright-report/
+test-results/
+
+# Personal settings, private credentials and customer/order records
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
+server/db.json
+server/*.db
+server/*.sqlite*
+
+# Local noise
+*.log
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Vercel local account metadata and temporary atomic database files
+.vercel/
+server/.db-*.tmp
+
+# Sensitive database exports (never commit customer data)
+backups/
