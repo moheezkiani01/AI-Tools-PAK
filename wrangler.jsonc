@@ -18,5 +18,13 @@
   "vars": {
     "CLOUDFLARE_WORKER": "1",
     "ORDER_STORAGE_V2": "false"
+  },
+{
+  "observability": {
+    "logs": {
+      "enabled": false,
+      "invocation_logs": true
+    }
   }
+}
 }
