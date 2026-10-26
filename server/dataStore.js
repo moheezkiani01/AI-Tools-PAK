@@ -4,7 +4,9 @@ import fs from "node:fs";
 import crypto from "node:crypto";
 import { createRefreshAheadCache } from "./refreshAheadCache.js";
 
-const DB_FILE = new URL("./db.json", import.meta.url);
+const DB_FILE = (() => {
+  try { return new URL("./db.json", import.meta.url); } catch { return null; }
+})();
 const versions = new WeakMap();
 const empty = () => ({ clicks: [], tokens: [], reviews: [], orders: [], questions: [], deletedProducts: [] });
 
@@ -82,7 +84,7 @@ export async function load() {
     revision = Number(rows[0].revision);
     db = rows[0].payload;
   } else {
-    try { db = fs.existsSync(DB_FILE) ? JSON.parse(fs.readFileSync(DB_FILE, "utf8")) : empty(); }
+    try { db = DB_FILE && fs.existsSync(DB_FILE) ? JSON.parse(fs.readFileSync(DB_FILE, "utf8")) : empty(); }
     catch { throw new StoreError("Local database could not be read. Make a backup before changing it."); }
     revision = Number(db?._revision || 0);
   }
@@ -107,11 +109,21 @@ export async function save(db) {
     });
     if (saved !== true) throw new StoreError("The data changed while saving. Please retry your action.", 409);
   } else {
-    const current = fs.existsSync(DB_FILE) ? JSON.parse(fs.readFileSync(DB_FILE, "utf8")) : empty();
+    const current = DB_FILE && fs.existsSync(DB_FILE) ? JSON.parse(fs.readFileSync(DB_FILE, "utf8")) : empty();
     if (Number(current._revision || 0) !== revision) throw new StoreError("Another change was saved first. Please retry.", 409);
-    const temp = new URL(`./.db-${crypto.randomBytes(6).toString("hex")}.tmp`, import.meta.url);
-    try { fs.writeFileSync(temp, JSON.stringify(next, null, 2), { mode: 0o600 }); fs.renameSync(temp, DB_FILE); }
-    finally { if (fs.existsSync(temp)) fs.unlinkSync(temp); }
+    let temp = null;
+    try {
+      temp = new URL(`./.db-${crypto.randomBytes(6).toString("hex")}.tmp`, import.meta.url);
+    } catch {
+      temp = null;
+    }
+    try {
+      if (temp && DB_FILE) {
+        fs.writeFileSync(temp, JSON.stringify(next, null, 2), { mode: 0o600 });
+        fs.renameSync(temp, DB_FILE);
+      }
+    }
+    finally { if (temp && fs.existsSync(temp)) fs.unlinkSync(temp); }
   }
   versions.set(db, revision + 1);
   invalidatePublicStateCache();
