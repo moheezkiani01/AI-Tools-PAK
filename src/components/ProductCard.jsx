@@ -1,6 +1,7 @@
 import { navigate } from "../utils/navigate";
 import { Stars } from "./Icon";
 import BrandIcon from "./BrandIcon";
+import { brandIconSlug } from "../utils/brandFor";
 import { memo } from "react";
 import { useCartActions } from "../context/CartContext";
 import { useStock } from "../context/StockContext";
@@ -11,7 +12,7 @@ import { useDiscounts } from "../context/DiscountContext";
 
 function ProductCard({ product, rating }) {
   const { addItem, setIsOpen } = useCartActions();
-  const out = useStock().isOut(product.slug);
+  const out = useStock().isOut(product.slug) || !!product.unavailable;
   const { priceFor } = useDiscounts();
   const sale = priceFor(product);
   const { slug, name, description, duration, limit, price, options, popular } = product;
@@ -33,12 +34,11 @@ function ProductCard({ product, rating }) {
   };
 
   return (
-    <article style={{ "--c": color }} className="glass card-hover card-wash fade-up relative flex flex-col p-5">
-      {out && <span className="absolute right-4 top-4 rounded-full bg-slate-500 px-3 py-1 text-xs font-semibold text-white">Out of stock</span>}
+    <article style={{ "--c": color }} className="catalog-perf-card glass card-hover card-wash fade-up relative flex flex-col p-5">
       {sale.onSale && !out && <span className="absolute right-4 top-4 rounded-full bg-rose-600 px-3 py-1 text-xs font-semibold text-white">{sale.rule?.type === "percent" ? `${sale.rule.value}% OFF` : "SALE"}</span>}
       {popular && !out && !sale.onSale && <span className="absolute right-4 top-4 rounded-full bg-[#2563eb] px-3 py-1 text-xs font-semibold text-white">Popular</span>}
       <div className="flex items-center gap-3">
-        <BrandIcon name={slug} category={product.category} />
+        <BrandIcon name={brandIconSlug(product.brand)||slug} category={product.category} />
         <span className="text-xs font-semibold uppercase tracking-wide text-slate-400">{category?.name}</span>
       </div>
       <h3 className="mt-4 text-xl font-bold">{name}</h3>

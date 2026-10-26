@@ -13,11 +13,11 @@ test('navigation uses full desktop links only at wide (xl) breakpoint', () => {
 test('main product listing provides mobile and desktop grids', () => {
   const grid = read('ProductGrid.jsx');
   assert.match(grid, /sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4/);
-  assert.match(grid, /overflow-x-auto/);
+  assert.match(grid, /grid-cols-2 gap-2 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-6/);
 });
-test('homepage categories reflow and end with four compact cards', () => {
-  assert.match(app, /sm:grid-cols-2 lg:auto-rows/);
-  assert.match(app, /lg:grid-cols-4/);
+test('homepage categories reflow to two and three columns without clipping categories', () => {
+  assert.match(app, /sm:grid-cols-2 xl:grid-cols-3/);
+  assert.match(app, /categories.map\(\(c\) => <CategoryCard/);
 });
 test('checkout and product details stack on mobile', () => {
   assert.match(read('Checkout.jsx'), /lg:grid-cols-\[1fr_380px\]/);

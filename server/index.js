@@ -9,7 +9,13 @@ import { allCategories } from "../src/data/categories.js";
 import { applyProductDetails } from "../src/utils/productDetails.js";
 import { brand } from "../src/config.js";
 import { salePrice, regularPrice } from "../src/utils/discounts.js";
-import { load, save, update, databaseMode, adminFailureCount } from "./dataStore.js";
+import { load, loadPublicState, save, update, databaseMode, adminFailureCount, supabaseRequest, StoreError } from "./dataStore.js";
+import { allPublicVariants, findPublicVariant, listPublicGroups, groupPublicVariants, adminCatalog, invalidatePublicCatalogCache } from "./catalog.js";
+import { LIVE_STATES, deletedStatus, restoredStatus, isDeletedStatus, isDeletedOriginal, deletedOriginalSlugs } from './productDeletion.js';
+import { verifyAdminPassword, startAdminSession, readAdminSession, clearAdminSession, hasValidAdminCsrf } from './adminAuth.js';
+import { buildCachedBrowsePage } from './browse.js';
+import { cachePublicResponse } from './publicCache.js';
+import { usingOrderTable, placeDedicatedOrder, dedicatedOrderSummary, listDedicatedOrders, updateDedicatedOrder } from './scaleOrders.js';
 
 // Settings come from server/.env (copy .env.example to .env and fill it in)
 const envFile = new URL("./.env", import.meta.url);
@@ -30,8 +36,16 @@ const summary = (list) => ({
 
 const app = express();
 app.use(compression());
-app.use(express.json({ limit: "10kb" }));
+app.use(express.json({ limit: "128kb" }));
 app.disable("x-powered-by");
+// Basic security headers, also applied to static Vercel routes in vercel.json.
+app.use((req,res,next)=>{
+  res.set('X-Content-Type-Options','nosniff');
+  res.set('X-Frame-Options','DENY');
+  res.set('Referrer-Policy','strict-origin-when-cross-origin');
+  res.set('Permissions-Policy','camera=(), microphone=(), geolocation=()');
+  next();
+});
 app.set("trust proxy", 1);
 app.use("/api", (req, res, next) => { res.set("Cache-Control", "no-store"); next(); });
 // All handlers are promise-safe with Express 4, including serverless execution.
@@ -42,15 +56,23 @@ for (const verb of ["get", "post", "patch", "delete"]) {
 }
 api.get("/api/health", async (req, res) => {
   const db = await load();
-  res.json({ ok: true, storage: databaseMode(), orders: (db.orders || []).length });
+  const other = usingOrderTable() ? await dedicatedOrderSummary() : {total:0};
+  res.json({ ok: true, storage: databaseMode(), orders: (db.orders || []).length + other.total });
 });
 
 // Each time a customer is sent to WhatsApp to order, we count one order
 // One count per visitor every 10 minutes, so the chart cannot be inflated by repeated requests
+// Bound process-local anti-spam data; Vercel instances are short lived and
+// this is NOT a distributed rate limit.
+const boundedSet = (map, key, value) => {
+  map.delete(key);
+  map.set(key, value);
+  if (map.size > 5000) map.delete(map.keys().next().value);
+};
 const lastClick = new Map();
 api.post("/api/orders/whatsapp", async (req, res) => {
   if (Date.now() - (lastClick.get(req.ip) || 0) < 10 * 60 * 1000) return res.json({ ok: true, counted: false });
-  lastClick.set(req.ip, Date.now());
+  boundedSet(lastClick, req.ip, Date.now());
   const db = await load();
   db.clicks.push({ date: new Date().toISOString(), items: String(req.body.items || "").slice(0, 200) });
   await save(db);
@@ -88,18 +110,36 @@ const orderStats = (db) => {
   };
 };
 
-api.get("/api/stats", async (req, res) => res.json(orderStats(await load())));
+// Merge historical JSONB orders with optional dedicated checkout rows.
+// The summary RPC aggregates orders inside Postgres, so no customer details
+// are fetched for the public chart, even when the table grows.
+const orderStatsScaled = async (db) => {
+  const result = orderStats(db);
+  if (!usingOrderTable()) return result;
+  const extra = await dedicatedOrderSummary();
+  result.total += extra.total;
+  result.website += extra.total;
+  result.websiteCheckout += extra.total;
+  const byDate = new Map(extra.days.map(({ date, count }) => [date, count]));
+  for (const day of result.days) {
+    const count = Number(byDate.get(day.date) || 0);
+    day.website += count;
+    day.count += count;
+  }
+  return result;
+};
+api.get("/api/stats", async (req, res) => cachePublicResponse(res, 30, 15).json(await orderStatsScaled(await loadPublicState())));
 
 api.get("/api/ratings", async (req, res) => {
   const bySlug = {};
-  for (const r of (await load()).reviews) (bySlug[r.slug] ||= []).push(r);
-  res.json(Object.fromEntries(Object.entries(bySlug).map(([slug, list]) => [slug, summary(list)])));
+  for (const r of (await loadPublicState()).reviews) (bySlug[r.slug] ||= []).push(r);
+  cachePublicResponse(res, 30, 15).json(Object.fromEntries(Object.entries(bySlug).map(([slug, list]) => [slug, summary(list)])));
 });
 
 api.get("/api/reviews/:slug", async (req, res) => {
-  const list = (await load()).reviews.filter((r) => r.slug === req.params.slug);
+  const list = (await loadPublicState()).reviews.filter((r) => r.slug === req.params.slug);
   const reviews = list.map(({ id, name, rating, comment, date, source }) => ({ id, name, rating, comment, date, source: source || "customer" })).reverse();
-  res.json({ ...summary(list), reviews });
+  cachePublicResponse(res, 30, 15).json({ ...summary(list), reviews });
 });
 
 // Website reviews require a valid, unused purchase number for the matching product.
@@ -110,7 +150,7 @@ const cleanReview = (body) => {
   const rating = Number(body.rating);
   const name = String(body.name || "").trim();
   const comment = String(body.comment || "").trim();
-  if (!products.some((p) => p.slug === slug)) return { error: "Choose a valid product." };
+  if (!products.some((p) => p.slug === slug) && !slug.startsWith("import-")) return { error: "Choose a valid product." };
   if (!name || name.length > 60 || !Number.isInteger(rating) || rating < 1 || rating > 5)
     return { error: "Enter your name and choose 1 to 5 stars." };
   if (comment.length < 5 || comment.length > 500) return { error: "Please write a comment (5 to 500 characters)." };
@@ -129,7 +169,7 @@ const purchaseTokenError = (db, input, slug) => {
 
 api.post("/api/reviews", async (req, res) => {
   const review = cleanReview(req.body || {});
-  if (review.error) return res.status(400).json({ error: review.error });
+  if (review.error || (review.slug.startsWith("import-") && !await findPublicVariant(review.slug))) return res.status(400).json({ error: review.error || "Product not available." });
   // Honeypot catches basic automated submissions; invisible to regular customers.
   if (req.body.website) return res.status(400).json({ error: "Could not submit this review." });
   const key = `${req.ip}:${review.slug}`;
@@ -145,7 +185,7 @@ api.post("/api/reviews", async (req, res) => {
     return { ok: true };
   });
   if (result.error) return res.status(400).json(result);
-  reviewLimits.set(key, [...recent, now]);
+  boundedSet(reviewLimits, key, [...recent, now]);
   res.json({ ok: true });
 });
 
@@ -172,7 +212,7 @@ api.post("/api/questions", async (req, res) => {
     published: false, displayName: "Anonymous" };
   if (!q.name || q.question.length < 5) return res.status(400).json({ error: "Please enter your name and your question." });
   if (q.email && !/^\S+@\S+\.\S+$/.test(q.email)) return res.status(400).json({ error: "That email address does not look right." });
-  asks.set(req.ip, [...recent, now]);
+  boundedSet(asks, req.ip, [...recent, now]);
   const db = await load();
   (db.questions ||= []).push(q);
   await save(db);
@@ -249,7 +289,7 @@ api.delete("/api/questions/:id", async (req, res) => {
 // Only customer-approved questions are shown publicly. No emails, phone
 // numbers, private management keys, or unpublished answers are included.
 api.get("/api/questions/public", async (req, res) => {
-  res.json(((await load()).questions || []).filter((q) => q.published && q.answer).reverse().slice(0, 100)
+  cachePublicResponse(res, 30, 15).json(((await loadPublicState()).questions || []).filter((q) => q.published && q.answer).reverse().slice(0, 100)
     .map(({ id, question, answer, displayName, publishedAt, publishedBy }) => ({ id, question, answer,
       name: displayName === "Anonymous" ? "Anonymous" : (displayName || "Anonymous"), date: publishedAt,
       publishedBy: publishedBy === "store" ? "store" : "customer" })));
@@ -257,29 +297,231 @@ api.get("/api/questions/public", async (req, res) => {
 
 // ---------- Admin (protected by ADMIN_PASSWORD in server/.env) ----------
 const adminFails = new Map();
-const requireAdmin = async (req, res, next) => {
-  const expected = process.env.ADMIN_PASSWORD;
-  if (!expected || expected.length < 12) return res.status(503).json({ error: "Set a strong ADMIN_PASSWORD (12+ characters) in your server environment settings." });
-  const ip = req.ip || "unknown";
-  const now = Date.now();
-  const key = crypto.createHash("sha256").update(ip).digest("hex");
-  const sharedFailures = await adminFailureCount(key);
-  const fails = sharedFailures === null ? (adminFails.get(ip) || []).filter((t) => now - t < 900000).length : sharedFailures;
-  if (fails >= 10) return res.status(429).json({ error: "Too many wrong attempts. Please wait 15 minutes." });
-  const given = Buffer.from(String(req.get("x-admin-password") || ""));
-  const wanted = Buffer.from(expected);
-  if (given.length !== wanted.length || !crypto.timingSafeEqual(given, wanted)) {
-    if (sharedFailures !== null) await adminFailureCount(key, true);
-    else adminFails.set(ip, [...(adminFails.get(ip) || []).filter((t) => now - t < 900000), now]);
-    return res.status(401).json({ error: "Wrong password." });
-  }
-  next();
+const adminPassword = () => process.env.ADMIN_PASSWORD;
+const adminConfigured = (res) => {
+  if (adminPassword()?.length >= 12) return true;
+  res.status(503).json({error:'Set a strong ADMIN_PASSWORD (12+ characters) in the server environment.'});
+  return false;
 };
+const isRateLimited = async (req, res) => {
+  const ip = req.ip || 'unknown';
+  const key = crypto.createHash('sha256').update(ip).digest('hex');
+  const shared = await adminFailureCount(key);
+  const fails = shared === null ? (adminFails.get(ip)||[]).filter(t=>Date.now()-t<900000).length : shared;
+  if(fails >= 10) {res.status(429).json({error:'Too many wrong attempts. Try again in 15 minutes.'});return true;}
+  return false;
+};
+const recordBadPassword = async req => {
+  const ip = req.ip || 'unknown';
+  const key = crypto.createHash('sha256').update(ip).digest('hex');
+  const shared = await adminFailureCount(key);
+  if(shared !== null) await adminFailureCount(key,true);
+  else boundedSet(adminFails, ip, [...(adminFails.get(ip)||[]).filter(t=>Date.now()-t<900000),Date.now()]);
+};
+api.post('/api/admin/login',async(req,res)=>{
+  if(!adminConfigured(res)) return;
+  if(await isRateLimited(req,res)) return;
+  if(!verifyAdminPassword(req.body?.password,adminPassword())){
+    await recordBadPassword(req);
+    return res.status(401).json({error:'Incorrect password.'});
+  }
+  // Never return or persist the password in browser storage.
+  return res.json(startAdminSession(req,res,adminPassword()));
+});
+api.get('/api/admin/session',async(req,res)=>{
+  if(!adminConfigured(res)) return;
+  const session=readAdminSession(req,adminPassword());
+  if(!session) return res.status(401).json({error:'Admin session expired. Sign in again.'});
+  return res.json(session);
+});
+api.post('/api/admin/logout',async(req,res)=>{clearAdminSession(req,res);res.json({ok:true})});
+const requireAdmin = async (req,res,next) => {
+  if(!adminConfigured(res)) return;
+  const session=readAdminSession(req,adminPassword());
+  if(session){
+    if(!hasValidAdminCsrf(req,session))return res.status(403).json({error:'Security token expired. Refresh admin and sign in again.'});
+    return next();
+  }
+  // Only for legacy integrations explicitly opted in on the server. OFF by default.
+  if(process.env.ALLOW_LEGACY_ADMIN_HEADER === 'true'){
+    if(await isRateLimited(req,res)) return;
+    if(verifyAdminPassword(req.get('x-admin-password'),adminPassword()))return next();
+    await recordBadPassword(req);
+  }
+  return res.status(401).json({error:'Admin session expired. Sign in again.'});
+};
+
+
+// Catalog rows are separate from the legacy JSONB shop state. Supplier costs never leave admin APIs.
+const catalogQuery = (req) => ({
+ search:String(req.query.search||'').slice(0,80), category:String(req.query.category||'all'),
+ page:Math.max(1,Math.min(1000,parseInt(req.query.page,10)||1)),
+ limit:Math.max(1,Math.min(200,parseInt(req.query.limit,10)||12)),
+ featured:req.query.featured==='true',
+});
+api.get('/api/catalog/browse',async(req,res)=>{
+  // Opt-in local diagnostics, never exposed on Vercel/production.
+  // A large client latency with small server timings points to connection,
+  // request queueing, response transfer, or the load generator itself.
+  const tracing = req.get('x-local-catalog-profile') === '1'
+    && process.env.NODE_ENV !== 'production' && !process.env.VERCEL;
+  const started = tracing ? performance.now() : 0;
+  let catalogueMs = 0;
+  let stateMs = 0;
+  const [imports,db]=tracing ? await Promise.all([
+    (async()=>{const t=performance.now();try{return await allPublicVariants();}finally{catalogueMs=performance.now()-t;}})(),
+    (async()=>{const t=performance.now();try{return await loadPublicState();}finally{stateMs=performance.now()-t;}})(),
+  ]) : await Promise.all([allPublicVariants(),loadPublicState()]);
+  const buildStarted = tracing ? performance.now() : 0;
+  const page=buildCachedBrowsePage(products,imports,db,req.query);
+  if(tracing){
+    const buildMs=performance.now()-buildStarted;
+    const elapsed=performance.now()-started;
+    res.set('Server-Timing',[
+      `catalog;dur=${catalogueMs.toFixed(2)}`,
+      `state;dur=${stateMs.toFixed(2)}`,
+      `build;dur=${buildMs.toFixed(2)}`,
+      `handler;dur=${elapsed.toFixed(2)}`,
+    ].join(', '));
+  }
+  cachePublicResponse(res, 12, 15).json(page);
+});
+api.get('/api/catalog/groups', async(req,res)=>cachePublicResponse(res, 15, 15).json(await listPublicGroups(catalogQuery(req))));
+api.get('/api/catalog/groups/:slug', async(req,res)=>cachePublicResponse(res, 15, 15).json({variants:await groupPublicVariants(req.params.slug)}));
+api.get('/api/catalog/variants', async(req,res)=>cachePublicResponse(res, 15, 15).json({variants:await allPublicVariants()}));
+api.get('/api/catalog/variants/:slug',async(req,res)=>{const product=await findPublicVariant(req.params.slug); if(!product)return res.status(404).json({error:'Product not available.'});cachePublicResponse(res, 10, 10).json({variant:product});});
+api.get('/api/admin/catalog',requireAdmin,async(req,res)=>res.json(await adminCatalog({
+ search:String(req.query.search||'').slice(0,80),searchField:String(req.query.searchField||'all'),status:String(req.query.status||''),
+ category:String(req.query.category||'all'),
+ page:Math.max(1,Math.min(1000,parseInt(req.query.page,10)||1)),
+ limit:Math.max(1,Math.min(100,parseInt(req.query.limit,10)||30)),
+ offset:req.query.offset===undefined?null:Math.max(0,Math.min(100000,Number.parseInt(req.query.offset,10)||0))
+})));
+api.get('/api/admin/catalog/summary',requireAdmin,async(req,res)=>{
+ const summary={total:0,featured:0,unavailable:0,flagged:0,visible:0};
+ for(let page=0;page<25;page++){
+  const rows=await supabaseRequest(`ai_tools_catalog?select=slug,status,featured,unavailable,review_flags&order=slug&offset=${page*500}&limit=500`);
+  if(!Array.isArray(rows))throw new StoreError('Could not load imported catalog summary.');
+  for(const item of rows){
+   summary.total++;
+   if(item.featured)summary.featured++;
+   if(item.unavailable)summary.unavailable++;
+   if(Array.isArray(item.review_flags)&&item.review_flags.length)summary.flagged++;
+   if(item.status==='published'||item.status==='pending'&&Array.isArray(item.review_flags)&&!item.review_flags.length)summary.visible++;
+  }
+  if(rows.length<500)break;
+ }
+ res.set('Cache-Control','no-store').json(summary);
+});
+api.post('/api/admin/catalog/import',requireAdmin,async(req,res)=>{
+ const variants=req.body?.variants;
+ if(!Array.isArray(variants)||!variants.length||variants.length>30)return res.status(400).json({error:'Provide 1–30 reviewed import records.'});
+ for(const row of variants){
+  if(!/^import-[a-z0-9-]{5,140}$/.test(String(row.slug||'')) || !Number.isSafeInteger(row.cost_cents)||row.cost_cents<1 ||
+   !Array.isArray(row.source_ids)||!row.source_ids.length || !['ai-tools','creative-tools','developer-tools','productivity','marketing-tools','vpn-security','entertainment','professional'].includes(row.category))
+   return res.status(400).json({error:'Invalid import record.'});
+ }
+ const count=await supabaseRequest('rpc/ai_tools_import_catalog',{method:'POST',body:{rows:variants}});
+ invalidatePublicCatalogCache();
+ res.json({ok:true,processed:count});
+});
+// Soft delete/restore leaves the product row, prices, orders and reviews intact.
+// Original catalogue: tiny list of deleted slugs in the existing ai_tools_state payload.
+// Imported catalogue: reuse the existing status column (e.g. deleted-published).
+api.post('/api/admin/products/:slug/delete', requireAdmin, async (req, res) => {
+ const slug = String(req.params.slug || '');
+ if (products.some(p => p.slug === slug)) {
+   const result = await update(db => {
+     const prior = new Set(deletedOriginalSlugs(db));
+     prior.add(slug);
+     db.deletedProducts = [...prior].sort();
+     return {ok:true,slug,deleted:true};
+   });
+   return res.json(result);
+ }
+ if (!/^import-[a-z0-9-]{5,140}$/.test(slug)) return res.status(404).json({error:'Unknown product.'});
+ const rows = await supabaseRequest(`ai_tools_catalog?select=status&slug=eq.${encodeURIComponent(slug)}&limit=1`);
+ if (!rows.length) return res.status(404).json({error:'Unknown imported product.'});
+ if (isDeletedStatus(rows[0].status)) return res.json({ok:true,slug,deleted:true});
+ const next = deletedStatus(rows[0].status);
+ if (!next) return res.status(409).json({error:'Invalid product status. Refresh and retry.'});
+ const changed = await supabaseRequest(`ai_tools_catalog?slug=eq.${encodeURIComponent(slug)}&status=eq.${encodeURIComponent(rows[0].status)}&select=slug,status`,{
+   method:'PATCH',body:{status:next,updated_at:new Date().toISOString()}
+ });
+ if (!changed.length) return res.status(409).json({error:'Product changed. Refresh and retry.'});
+ invalidatePublicCatalogCache();
+ res.json({ok:true,slug,deleted:true});
+});
+api.post('/api/admin/products/:slug/restore', requireAdmin, async (req, res) => {
+ const slug = String(req.params.slug || '');
+ if (products.some(p => p.slug === slug)) {
+   const result = await update(db => {
+     db.deletedProducts = deletedOriginalSlugs(db).filter(value => value !== slug);
+     return {ok:true,slug,deleted:false};
+   });
+   return res.json(result);
+ }
+ if (!/^import-[a-z0-9-]{5,140}$/.test(slug)) return res.status(404).json({error:'Unknown product.'});
+ const rows = await supabaseRequest(`ai_tools_catalog?select=status&slug=eq.${encodeURIComponent(slug)}&limit=1`);
+ if (!rows.length) return res.status(404).json({error:'Unknown imported product.'});
+ const previous = restoredStatus(rows[0].status);
+ if (!previous) return res.status(409).json({error:'Product is not in Deleted items.'});
+ const changed = await supabaseRequest(`ai_tools_catalog?slug=eq.${encodeURIComponent(slug)}&status=eq.${encodeURIComponent(rows[0].status)}&select=slug,status`,{
+   method:'PATCH',body:{status:previous,updated_at:new Date().toISOString()}
+ });
+ if (!changed.length) return res.status(409).json({error:'Product changed. Refresh and retry.'});
+ invalidatePublicCatalogCache();
+ res.json({ok:true,slug,deleted:false});
+});
+
+// Fetch one imported plan for the private admin editor, including hidden/review records.
+// Only required editing fields are returned; supplier cost and source IDs stay private.
+api.get('/api/admin/catalog/:slug',requireAdmin,async(req,res)=>{
+ const slug=String(req.params.slug||'');
+ if(!/^import-[a-z0-9-]{5,140}$/.test(slug))return res.status(400).json({error:'Invalid catalog ID.'});
+ const fields='slug,brand,name,description,category,variant,product_type,price_pkr,manual_price_pkr,discount_percent,featured,unavailable,status,review_flags';
+ const rows=await supabaseRequest(`ai_tools_catalog?select=${fields}&slug=eq.${encodeURIComponent(slug)}&limit=1`);
+ if(!Array.isArray(rows)||!rows.length)return res.status(404).json({error:'Imported product not found.'});
+ res.json({item:Object.fromEntries(fields.split(',').map(field=>[field,rows[0][field]]))});
+});
+api.patch('/api/admin/catalog/:slug',requireAdmin,async(req,res)=>{
+ const slug=String(req.params.slug||'');
+ if(!/^import-[a-z0-9-]{5,140}$/.test(slug))return res.status(400).json({error:'Invalid catalog ID.'});
+ const allowed=['name','description','category','variant','product_type','status','featured','unavailable','manual_price_pkr','discount_percent'];
+ const changes=Object.fromEntries(Object.entries(req.body||{}).filter(([k])=>allowed.includes(k)));
+ if(!Object.keys(changes).length)return res.status(400).json({error:'No changes requested.'});
+ if(changes.name!==undefined && (!String(changes.name).trim()||String(changes.name).length>230))return res.status(400).json({error:'Invalid product title.'});
+ if(changes.description!==undefined && String(changes.description).length>540)return res.status(400).json({error:'Description too long.'});
+ if(changes.category!==undefined && !allCategories.some(c=>c.slug===changes.category&&c.slug!=='discounts'))return res.status(400).json({error:'Choose a valid category.'});
+ if(changes.variant!==undefined && (typeof changes.variant!=='string'||changes.variant.length>230))return res.status(400).json({error:'Invalid plan or duration.'});
+ if(changes.product_type!==undefined && (typeof changes.product_type!=='string'||changes.product_type.length>50))return res.status(400).json({error:'Invalid account or plan type.'});
+ if(changes.status!==undefined && !['pending','published','hidden','rejected'].includes(changes.status))return res.status(400).json({error:'Invalid publishing status.'});
+ for(const key of ['featured','unavailable'])if(key in changes&&typeof changes[key]!=='boolean')return res.status(400).json({error:'Invalid boolean field.'});
+ if(changes.manual_price_pkr!==undefined && changes.manual_price_pkr!==null && (!Number.isSafeInteger(changes.manual_price_pkr)||changes.manual_price_pkr<1))return res.status(400).json({error:'Invalid price.'});
+ if(changes.discount_percent!==undefined && (!Number.isInteger(changes.discount_percent)||changes.discount_percent<0||changes.discount_percent>90))return res.status(400).json({error:'Invalid discount percent.'});
+ const current=await supabaseRequest(`ai_tools_catalog?slug=eq.${encodeURIComponent(slug)}&select=status,review_flags&limit=1`);
+ if(!current.length)return res.status(404).json({error:'Catalog item not found.'});
+ if(changes.status==='published' && (!Array.isArray(current[0].review_flags) || current[0].review_flags.length>0))
+   return res.status(409).json({error:'This offer still requires eligibility/resale review. Resolve the review flags before publishing.'});
+ if(isDeletedStatus(current[0].status))return res.status(409).json({error:'Restore this product before editing it.'});
+ const result=await supabaseRequest(`ai_tools_catalog?slug=eq.${encodeURIComponent(slug)}&select=slug,status`,{method:'PATCH',body:{...changes,updated_at:new Date().toISOString()}});
+ if(!result.length)return res.status(404).json({error:'Catalog item not found.'});
+ invalidatePublicCatalogCache();
+ res.json({ok:true,item:result[0]});
+});
+api.post('/api/admin/catalog/exchange-rate',requireAdmin,async(req,res)=>{
+ const rate=req.body?.usd_to_pkr;
+ if(!Number.isSafeInteger(rate)||rate<1||rate>100000)return res.status(400).json({error:'Invalid exchange rate.'});
+ await supabaseRequest('ai_tools_catalog_settings?id=eq.1',{method:'PATCH',body:{usd_to_pkr:rate,updated_at:new Date().toISOString()}});
+ await supabaseRequest('rpc/ai_tools_reprice_catalog',{method:'POST',body:{}});
+ invalidatePublicCatalogCache();
+ res.json({ok:true,rate});
+});
 
 // ---------- Historical/offline order entries ----------
 api.get("/api/admin/manual-orders", requireAdmin, async (req, res) => {
   const db = await load();
-  res.json({ entries: (db.manualOrders || []).slice().reverse(), stats: orderStats(db) });
+  res.json({ entries: (db.manualOrders || []).slice().reverse(), stats: await orderStatsScaled(db) });
 });
 
 api.post("/api/admin/manual-orders", requireAdmin, async (req, res) => {
@@ -297,7 +539,7 @@ api.post("/api/admin/manual-orders", requireAdmin, async (req, res) => {
   const db = await load();
   (db.manualOrders ||= []).push({ id: crypto.randomBytes(8).toString("hex"), date, count, source, note, createdAt: new Date().toISOString() });
   await save(db);
-  res.status(201).json({ ok: true, stats: orderStats(db) });
+  res.status(201).json({ ok: true, stats: await orderStatsScaled(db) });
 });
 
 api.delete("/api/admin/manual-orders/:id", requireAdmin, async (req, res) => {
@@ -306,18 +548,26 @@ api.delete("/api/admin/manual-orders/:id", requireAdmin, async (req, res) => {
   db.manualOrders = (db.manualOrders || []).filter((o) => o.id !== req.params.id);
   if (db.manualOrders.length === before) return res.status(404).json({ error: "Entry not found." });
   await save(db);
-  res.json({ ok: true, stats: orderStats(db) });
+  res.json({ ok: true, stats: await orderStatsScaled(db) });
 });
 
 // ---------- Actual website checkout orders (private admin data) ----------
 api.get("/api/admin/website-orders", requireAdmin, async (req, res) => {
   const db = await load();
   // Most recent first. Keep personal customer details restricted to admin access.
-  res.json({ orders: (db.orders || []).slice().reverse().slice(0, 200) });
+  const dedicated = await listDedicatedOrders();
+  const legacy = (db.orders || []).slice().reverse().slice(0, 200);
+  const orders = [...dedicated, ...legacy]
+    .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
+    .slice(0, 200);
+  res.json({ orders });
 });
 api.patch("/api/admin/website-orders/:number", requireAdmin, async (req, res) => {
   const status = String(req.body?.status || "");
   if (!["Pending", "Completed", "Cancelled"].includes(status)) return res.status(400).json({ error: "Invalid order status." });
+  if (await updateDedicatedOrder(req.params.number, status)) {
+    return res.json({ok:true,number:req.params.number,status});
+  }
   const result = await update((db) => {
     const order = (db.orders || []).find((item) => item.number === req.params.number);
     if (!order) return { error: "Order not found." };
@@ -339,7 +589,7 @@ api.get("/api/admin/purchase-numbers", requireAdmin, async (req, res) => {
 api.post("/api/admin/purchase-numbers", requireAdmin, async (req, res) => {
   const slug = String(req.body.slug || "").trim();
   const orderReference = String(req.body.orderReference || "").trim();
-  if (!products.some((p) => p.slug === slug)) return res.status(400).json({ error: "Choose the product that was sold." });
+  if (!products.some((p) => p.slug === slug) && !await findPublicVariant(slug)) return res.status(400).json({ error: "Choose the product that was sold." });
   if (orderReference.length > 80) return res.status(400).json({ error: "Order reference is too long." });
   const db = await load();
   let token;
@@ -370,7 +620,7 @@ api.get("/api/admin/reviews", requireAdmin, async (req, res) => {
 });
 api.post("/api/admin/reviews", requireAdmin, async (req, res) => {
   const review = cleanReview(req.body || {});
-  if (review.error) return res.status(400).json({ error: review.error });
+  if (review.error || (review.slug.startsWith("import-") && !await findPublicVariant(review.slug))) return res.status(400).json({ error: review.error || "Product not available." });
   const date = String(req.body.date || pakistanDate());
   const dateObj = new Date(`${date}T12:00:00Z`);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || Number.isNaN(dateObj.getTime()) || dateObj.toISOString().slice(0, 10) !== date || date > pakistanDate())
@@ -479,8 +729,8 @@ const liveProduct = (db, slug) => {
   return product ? applyProductDetails(product, activeProductDetails(db)[slug]) : null;
 };
 api.get("/api/product-details", async (req, res) => {
-  res.set("Cache-Control", "no-store");
-  res.json({ details: activeProductDetails(await load()) });
+  const db = await loadPublicState();
+  cachePublicResponse(res, 15, 15).json({ details: activeProductDetails(db), deletedProducts: deletedOriginalSlugs(db) });
 });
 api.get("/api/admin/product-details", requireAdmin, async (req, res) => res.json({ details: activeProductDetails(await load()) }));
 api.post("/api/admin/product-details", requireAdmin, async (req, res) => {
@@ -578,9 +828,8 @@ api.delete("/api/admin/prices/:slug", requireAdmin, async (req, res) => {
   res.json({ ok: true, prices: db.priceOverrides });
 });
 api.get("/api/discounts", async (req, res) => {
-  res.set("Cache-Control", "no-store");
-  const db = await load();
-  res.json({ discounts: activeDiscounts(db), prices: activePrices(db) });
+  const db = await loadPublicState();
+  cachePublicResponse(res, 10, 10).json({ discounts: activeDiscounts(db), prices: activePrices(db) });
 });
 api.get("/api/admin/discounts", requireAdmin, async (req, res) => res.json({ discounts: activeDiscounts(await load()) }));
 api.post("/api/admin/discounts", requireAdmin, async (req, res) => {
@@ -611,7 +860,7 @@ api.delete("/api/admin/discounts/:slug", requireAdmin, async (req, res) => {
 });
 
 // ---------- Stock (the admin marks products Available or Out of stock) ----------
-api.get("/api/stock", async (req, res) => res.json({ outOfStock: (await load()).outOfStock || [] }));
+api.get("/api/stock", async (req, res) => cachePublicResponse(res, 10, 10).json({ outOfStock: (await loadPublicState()).outOfStock || [] }));
 
 api.post("/api/admin/stock", requireAdmin, async (req, res) => {
   const { slug, available } = req.body;
@@ -625,7 +874,11 @@ api.post("/api/admin/stock", requireAdmin, async (req, res) => {
 });
 
 // Price always comes from the server's own product list, never from the browser
-const lineFor = (item, discounts, prices, details = {}) => {
+const lineFor = (item, discounts, prices, details = {}, imported = new Map()) => {
+  if(imported.has(String(item.key||"").split("|")[0])) {
+    const p=imported.get(String(item.key||"").split("|")[0]);
+    return {slug:p.slug,name:p.name,label:p.variant,originalPrice:p.price,price:p.finalPrice,qty:Math.min(Math.max(parseInt(item.qty)||1,1),20)};
+  }
   const [slug, label] = String(item.key || "").split("|");
   const base = products.find((p) => p.slug === slug);
   const product = base ? applyProductDetails(base, details[slug]) : null;
@@ -646,14 +899,40 @@ api.post("/api/orders", async (req, res) => {
   const idempotencyKey = String(req.get("x-idempotency-key") || "");
   if (idempotencyKey && !/^[a-f0-9-]{36}$/i.test(idempotencyKey))
     return res.status(400).json({ error: "Invalid order request ID." });
+  const importSlugs = [...new Set((Array.isArray(items) ? items : []).map(i=>String(i?.key||'').split('|')[0]).filter(slug=>slug.startsWith('import-')))];
+  const imported = new Map();
+  for(const slug of importSlugs){const p=await findPublicVariant(slug);if(p)imported.set(slug,p);}
+  if (usingOrderTable()) {
+    // Always re-check live product rules before an order insert. Do NOT use
+    // cached catalogue or browser-submitted prices for checkout.
+    const db = await load();
+    // During rollout, a retry of an order created by the legacy writer must
+    // return its original number, not create another row in the new table.
+    const previousLegacyOrder = idempotencyKey && (db.orders || []).find(o => o.idempotencyKey === idempotencyKey);
+    if (previousLegacyOrder) return res.json({order:{number:previousLegacyOrder.number,total:previousLegacyOrder.total}});
+    const validItems = Array.isArray(items) && items.length > 0 && items.length <= 20 &&
+      items.every(item => item && typeof item === 'object');
+    const lines = validItems
+      ? items.map(item => lineFor(item, activeDiscounts(db), activePrices(db), activeProductDetails(db), imported)) : [];
+    if (!lines.length || lines.includes(null)) return res.status(400).json({error:'Your cart is empty or has an unknown product.'});
+    const soldOut = lines.find(line => (db.outOfStock || []).includes(line.slug) || imported.get(line.slug)?.unavailable);
+    if (soldOut) return res.status(400).json({error:`${soldOut.name} is currently out of stock. Please remove it from your cart.`});
+    const removed = lines.find(line => isDeletedOriginal(db, line.slug));
+    if (removed) return res.status(400).json({error:`${removed.name} is no longer listed. Please remove it from your cart.`});
+    const total = lines.reduce((sum, line) => sum + line.price * line.qty, 0);
+    const order = await placeDedicatedOrder({idempotencyKey,customer:clean,items:lines,total});
+    return res.json({order});
+  }
   const result = await update((db) => {
     const prior = idempotencyKey && (db.orders || []).find((o) => o.idempotencyKey === idempotencyKey);
     if (prior) return { prior: true, order: { number: prior.number, total: prior.total } };
     const lines = Array.isArray(items) && items.length > 0 && items.length <= 20 && items.every((item) => item && typeof item === "object")
-      ? items.map((item) => lineFor(item, activeDiscounts(db), activePrices(db), activeProductDetails(db))) : [];
+      ? items.map((item) => lineFor(item, activeDiscounts(db), activePrices(db), activeProductDetails(db), imported)) : [];
     if (!lines.length || lines.includes(null)) return { error: "Your cart is empty or has an unknown product." };
-    const soldOut = lines.find((l) => (db.outOfStock || []).includes(l.slug));
+    const soldOut = lines.find((l) => (db.outOfStock || []).includes(l.slug) || imported.get(l.slug)?.unavailable);
     if (soldOut) return { error: `${soldOut.name} is currently out of stock. Please remove it from your cart.` };
+    const removed = lines.find(line => isDeletedOriginal(db, line.slug));
+    if (removed) return {error:`${removed.name} is no longer listed. Please remove it from your cart.`};
     db.orders ||= [];
     let number;
     do number = `AIT-${crypto.randomInt(100000, 1000000)}`; while (db.orders.some((o) => o.number === number));
@@ -679,10 +958,13 @@ if (!process.env.VERCEL && fs.existsSync(dist)) {
       let html = fs.readFileSync(page, "utf8");
       // Keep the search-engine data honest: out-of-stock products are reported as such
       const slug = req.path.match(/^\/product\/([^/]+)\/?$/)?.[1];
+      if (slug && products.some(p => p.slug === slug) && isDeletedOriginal(await load(), slug)) {
+        return res.status(404).type('text/plain').send('This product is no longer listed.');
+      }
       if (slug) {
         const db = await load();
         if ((db.outOfStock || []).includes(slug)) html = html.replaceAll("https://schema.org/InStock", "https://schema.org/OutOfStock");
-        const product = liveProduct(db, slug);
+        const product = isDeletedOriginal(db, slug) ? null : liveProduct(db, slug);
         const discount = activeDiscounts(db)[slug];
         if (product) {
           const escapeMeta = (text) => String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");

@@ -9,7 +9,7 @@ export default function Reviews({ slug }) {
   const [message, setMessage] = useState(null);
   const [saving, setSaving] = useState(false);
 
-  const loadReviews = () => fetch(`/api/reviews/${encodeURIComponent(slug)}`, { cache: "no-store" }).then((r) => r.json()).then(setData).catch(() => {});
+  const loadReviews = () => fetch(`/api/reviews/${encodeURIComponent(slug)}`).then((r) => r.json()).then(setData).catch(() => {});
   useEffect(() => { setForm(emptyForm); setMessage(null); loadReviews(); }, [slug]);
 
   const submit = async (e) => {

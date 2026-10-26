@@ -4,9 +4,13 @@ import { allCategories } from "../data/categories";
 import { editableProductDetails } from "../utils/productDetails";
 import { useProducts } from "../context/ProductContext";
 import BrandIcon from "./BrandIcon";
+import AdminImportedDetailEditor from "./AdminImportedDetailEditor";
 
-const headers = (password) => ({ "Content-Type": "application/json", "x-admin-password": password });
-const defaultsFor = (slug) => editableProductDetails(originals.find((p) => p.slug === slug));
+const headers = (password) => ({ "Content-Type": "application/json", "x-admin-csrf": password });
+const defaultsFor = (slug) => {
+  const product = originals.find((p) => p.slug === slug);
+  return product ? editableProductDetails(product) : {};
+};
 
 function TextField({ field, title, max = 250, rows = 0, hint = "", draft, change }) {
   return (
@@ -18,7 +22,7 @@ function TextField({ field, title, max = 250, rows = 0, hint = "", draft, change
   );
 }
 
-export default function AdminEditDetails({ password }) {
+export default function AdminEditDetails({ password, initialSlug = "" }) {
   const products = useProducts();
   const [slug, setSlug] = useState(originals[0].slug);
   const [saved, setSaved] = useState({});
@@ -28,6 +32,7 @@ export default function AdminEditDetails({ password }) {
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const product = products.find((p) => p.slug === slug);
+  const isImported = slug.startsWith("import-") || !!product?.imported;
   const original = originals.find((p) => p.slug === slug);
 
   const read = async () => {
@@ -37,11 +42,12 @@ export default function AdminEditDetails({ password }) {
     setSaved(data.details || {});
   };
   useEffect(() => { read().catch((e) => setMessage(e.message)); }, [password]);
+  useEffect(() => { if (initialSlug) setSlug(initialSlug); }, [initialSlug]);
   useEffect(() => {
     const next = { ...defaultsFor(slug), ...(saved[slug] || {}) };
     setDraft(next);
-    setMonthsText((next.months || []).join(", "));
-    setFeaturesText((next.features || []).join("\n"));
+    setMonthsText((Array.isArray(next.months) ? next.months : []).join(", "));
+    setFeaturesText((Array.isArray(next.features) ? next.features : []).join("\n"));
   }, [slug, saved]);
   const change = (key, value) => setDraft((before) => ({ ...before, [key]: value }));
   const submit = async (reset = false) => {
@@ -64,15 +70,28 @@ export default function AdminEditDetails({ password }) {
     } catch (error) { setMessage(error.message); }
     finally { setBusy(false); }
   };
+  const picker = <label className="block text-sm font-semibold">Choose a product
+    <select aria-label="Choose a product to edit" className="field mt-2" value={slug} onChange={(event) => {setSlug(event.target.value);setMessage("");}}>
+      {isImported && !products.some((p) => p.slug === slug) && <option value={slug}>Imported product · {slug}</option>}
+      {products.map((p) => <option key={p.slug} value={p.slug}>{p.imported ? "Imported · " : ""}{p.name}</option>)}
+    </select>
+  </label>;
+  // Imported rows are stored in ai_tools_catalog, not in the original product-details JSON.
+  // Rendering the original editor for an import caused a crash at original.name/options.
+  if (isImported) return <div className="mt-6 space-y-5">
+    <div className="glass p-5">{picker}</div>
+    <AdminImportedDetailEditor key={slug} password={password} slug={slug} />
+  </div>;
+  if (!original) return <div className="glass mt-6 p-5" role="alert">
+    <p className="font-bold">The selected product cannot be edited here.</p>
+    <p className="mt-2 text-sm">Choose another product. Existing records were not changed.</p>
+    {picker}
+  </div>;
   return <div className="mt-6 space-y-5">
     <div className="glass space-y-5 p-5">
       <h2 className="text-xl font-bold">Edit product information</h2>
       <p className="text-sm text-slate-400">Change the details customers see in the catalogue and product page. Slug, product identity, logo and purchase numbers remain linked. Edit regular prices in the separate Edit prices tab.</p>
-      <label className="block text-sm font-semibold">Choose a product
-        <select className="field mt-2" value={slug} onChange={(e) => { setSlug(e.target.value); setMessage(""); }}>
-          {products.map((p) => <option key={p.slug} value={p.slug}>{p.name}</option>)}
-        </select>
-      </label>
+      {picker}
       <div className="flex items-center gap-3 rounded-xl border border-[color:var(--border)] p-3">
         <BrandIcon name={slug} category={product?.category} size={44}/>
         <div><p className="font-bold">{original.name}</p><p className="text-xs text-slate-400">Product ID: {slug} (permanent)</p></div>

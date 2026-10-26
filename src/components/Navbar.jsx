@@ -107,13 +107,24 @@ export default function Navbar({ onSelect }) {
       </div>
 
       {menuOpen && (
-        <nav className="flex flex-col gap-4 border-t border-[color:var(--border)] px-5 py-5 xl:hidden" onClick={close}>
-          <a href="/" className={linkClass}>Home</a>
-          {categories.map((c) => <a key={c.slug} href={`/${c.slug}`} className={linkClass}>{c.name}</a>)}
-          {resources.map(([label, href]) => <a key={href} href={href} className={linkClass}>{label}</a>)}
-          <a href="/#how-it-works" className={linkClass}>How It Works</a>
-          <a href="/#faq" className={linkClass}>FAQ</a>
-          <a href="/#contact" className={linkClass}>Contact</a>
+        <nav aria-label="Mobile menu" className="max-h-[calc(100dvh-4rem)] overflow-y-auto overscroll-contain border-t border-[color:var(--border)] px-5 py-4 xl:hidden" onClick={(event) => { if (event.target.closest('a')) close(); }}>
+          <div className="flex flex-col gap-3">
+            <a href="/" className={linkClass}>Home</a>
+            <a href="/products" className={linkClass}>All products</a>
+            <details className="rounded-xl border border-[color:var(--border)] p-3">
+              <summary className="cursor-pointer font-semibold">Browse categories</summary>
+              <div className="mt-3 grid gap-3 pl-2">{categories.map((c) => <a key={c.slug} href={`/${c.slug}`} className={linkClass}>{c.name}</a>)}</div>
+            </details>
+            <details className="rounded-xl border border-[color:var(--border)] p-3">
+              <summary className="cursor-pointer font-semibold">Help, guides &amp; resources</summary>
+              <div className="mt-3 grid gap-3 pl-2">{resources.map(([label, href]) => <a key={href} href={href} className={linkClass}>{label}</a>)}</div>
+            </details>
+            <div className="flex flex-wrap gap-4 py-2">
+              <a href="/#how-it-works" className={linkClass}>How It Works</a>
+              <a href="/#faq" className={linkClass}>FAQ</a>
+              <a href="/#contact" className={linkClass}>Contact</a>
+            </div>
+          </div>
         </nav>
       )}
     </header>

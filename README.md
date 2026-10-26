@@ -1,3 +1,5 @@
+> **October 2026 catalog upgrade:** Read [UPGRADE_GUIDE.md](./UPGRADE_GUIDE.md) before applying the additive Supabase migration and importing supplier products.
+
 # AI Tools PAK — GitHub + Vercel Hobby + Supabase Free
 
 Study/demo website: React + Vite storefront, Node.js/Express serverless API, password-protected admin and **Supabase PostgreSQL** storage. No Upstash, no paid database, no credit card or domain purchase is required for the basic project. Custom cursor tails and bubble effects remain removed.

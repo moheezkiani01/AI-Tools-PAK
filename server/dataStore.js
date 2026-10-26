@@ -2,10 +2,11 @@
 // A database-side compare-and-save function prevents lost updates on Vercel.
 import fs from "node:fs";
 import crypto from "node:crypto";
+import { createRefreshAheadCache } from "./refreshAheadCache.js";
 
 const DB_FILE = new URL("./db.json", import.meta.url);
 const versions = new WeakMap();
-const empty = () => ({ clicks: [], tokens: [], reviews: [], orders: [], questions: [] });
+const empty = () => ({ clicks: [], tokens: [], reviews: [], orders: [], questions: [], deletedProducts: [] });
 
 export class StoreError extends Error {
   constructor(message, status = 503) { super(message); this.status = status; }
@@ -25,7 +26,7 @@ const storageReady = () => {
 
 // This uses the current sb_secret_ format (server ONLY, never prefixed VITE_).
 // Supabase's new secret keys go in the apikey header, NOT Authorization: Bearer.
-export async function supabaseRequest(path, { method = "GET", body } = {}) {
+export async function supabaseRequest(path, { method = "GET", body, count = false } = {}) {
   storageReady();
   if (!hasSupabase()) throw new StoreError("Supabase is not configured.");
   let response;
@@ -35,6 +36,7 @@ export async function supabaseRequest(path, { method = "GET", body } = {}) {
       headers: {
         apikey: process.env.SUPABASE_SECRET_KEY,
         "Content-Type": "application/json",
+        Prefer: count ? "return=representation,count=exact" : "return=representation",
         Accept: "application/json",
       },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -47,8 +49,24 @@ export async function supabaseRequest(path, { method = "GET", body } = {}) {
   }
   const result = await response.json().catch(() => undefined);
   if (result === undefined) throw new StoreError("Supabase returned an unreadable response.");
+  if (count) {
+    const contentRange = response.headers.get("content-range") || "";
+    const match = contentRange.match(/\/(\d+)$/);
+    // A missing count is not zero; the caller needs to handle it explicitly.
+    return { data: result, count: match ? Number(match[1]) : null };
+  }
   return result;
 }
+
+// Public-only shop state can refresh just ahead of its two-second TTL.
+// Checkout, admin and writes still use load() and bypass this cache entirely.
+// All cache results are read-only for callers. Admin saves invalidate the
+// cache; expired snapshots are never returned after their freshness limit.
+const publicStateCache = createRefreshAheadCache(load, {
+  ttlMs: 2_000, refreshAheadMs: 450,
+});
+export function loadPublicState() { return publicStateCache.get(); }
+export function invalidatePublicStateCache() { publicStateCache.invalidate(); }
 
 export async function load() {
   storageReady();
@@ -94,6 +112,7 @@ export async function save(db) {
     finally { if (fs.existsSync(temp)) fs.unlinkSync(temp); }
   }
   versions.set(db, revision + 1);
+  invalidatePublicStateCache();
 }
 
 // Checkout, verified reviews and other multi-step updates replay after a write conflict.

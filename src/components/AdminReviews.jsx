@@ -1,8 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useProducts } from "../context/ProductContext";
 import { Stars } from "./Icon";
 
-const headers = (password) => ({ "Content-Type": "application/json", "x-admin-password": password });
+const headers = (password) => ({ "Content-Type": "application/json", "x-admin-csrf": password });
 const pakistanToday = () => new Date(Date.now() + 5 * 3600000).toISOString().slice(0, 10);
 const empty = { slug: "", name: "", rating: 5, comment: "", date: pakistanToday(), source: "imported" };
 const sourceOptions = [
@@ -14,12 +14,20 @@ const sourceOptions = [
 
 export default function AdminReviews({ password }) {
   const products = useProducts();
+  const [productSearch, setProductSearch] = useState("");
   const [form, setForm] = useState({ ...empty, slug: products[0]?.slug || "" });
+  const filteredProducts = useMemo(() => products.filter(p => `${p.name} ${p.brand || ""}`.toLowerCase().includes(productSearch.toLowerCase())).slice(0, 150), [products, productSearch]);
+  const choices = products.find(p => p.slug === form.slug && !filteredProducts.some(f => f.slug === form.slug)) ? [products.find(p => p.slug === form.slug), ...filteredProducts] : filteredProducts;
   const [reviews, setReviews] = useState([]);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const [sourceDrafts, setSourceDrafts] = useState({});
   const [updatingId, setUpdatingId] = useState(null);
+  // Imported products may arrive after the first render. Always keep a valid selection.
+  useEffect(() => {
+    if (products.length && !products.some(p => p.slug === form.slug))
+      setForm(old => ({ ...old, slug: products[0].slug }));
+  }, [products, form.slug]);
 
   const load = async () => {
     try {
@@ -77,7 +85,8 @@ export default function AdminReviews({ password }) {
       <p className="text-sm text-slate-400">Record genuine customer feedback from WhatsApp, offline, or website records. Choose the real feedback source. Admin-entered reviews are visibly identified on product pages; they are never displayed as independently posted by a visitor.</p>
       <form className="glass space-y-4 p-5" onSubmit={add}>
         <h2 className="text-xl font-bold">Add customer feedback</h2>
-        <label className="block text-sm">Product<select className="field mt-1" value={form.slug} onChange={(e) => setForm({ ...form, slug: e.target.value })}>{products.map((p) => <option value={p.slug} key={p.slug}>{p.name}</option>)}</select></label>
+        <label className="block text-sm">Find a product (including imported plans)<input className="field mt-1" type="search" placeholder="Search product name" value={productSearch} onChange={e=>setProductSearch(e.target.value)} /></label>
+        <label className="block text-sm">Product<select className="field mt-1" value={form.slug} onChange={(e) => setForm({ ...form, slug: e.target.value })}>{choices.map((p) => <option value={p.slug} key={p.slug}>{p.name}</option>)}</select></label>
         <div className="grid gap-3 sm:grid-cols-2">
           <label className="text-sm">Customer name<input className="field mt-1" value={form.name} maxLength={60} onChange={(e) => setForm({ ...form, name: e.target.value })} required /></label>
           <label className="text-sm">Original feedback date<input type="date" className="field mt-1" max={pakistanToday()} value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} required /></label>

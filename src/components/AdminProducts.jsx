@@ -6,8 +6,8 @@ import SalePrice from "./SalePrice";
 import { useDiscounts } from "../context/DiscountContext";
 
 // Admin: mark each product Available or Out of stock
-export default function AdminProducts({ password }) {
-  const products = useProducts();
+export default function AdminProducts({ password, openImports }) {
+  const products = useProducts().filter(p => !p.imported);
   const { priceFor } = useDiscounts();
   const [outOfStock, setOutOfStock] = useState([]);
   const [error, setError] = useState("");
@@ -18,7 +18,7 @@ export default function AdminProducts({ password }) {
 
   const setAvailable = async (slug, available) => {
     setError("");
-    const res = await fetch("/api/admin/stock", { method: "POST", headers: { "Content-Type": "application/json", "x-admin-password": password }, body: JSON.stringify({ slug, available }) });
+    const res = await fetch("/api/admin/stock", { method: "POST", headers: { "Content-Type": "application/json", "x-admin-csrf": password }, body: JSON.stringify({ slug, available }) });
     const body = await res.json().catch(() => null);
     if (!res.ok) return setError(body?.error || "Could not save.");
     setOutOfStock(body.outOfStock);
@@ -26,6 +26,10 @@ export default function AdminProducts({ password }) {
 
   return (
     <div className="mt-6">
+    <div className="glass flex flex-wrap items-center justify-between gap-3 p-4" role="note">
+      <p className="max-w-2xl text-sm">Imported subscriptions are managed separately: use Product details or Imported catalog to mark them available or unavailable.</p>
+      <button type="button" className="btn-ghost" onClick={openImports}>Manage imported products</button>
+    </div>
       <p className="text-sm text-slate-400">Out-of-stock products cannot be ordered on the website. Changes apply straight away.</p>
       {error && <p role="alert" className="mt-3 text-sm text-red-600 dark:text-red-400">{error}</p>}
       <ul className="mt-4 space-y-2">

@@ -105,5 +105,14 @@ export const brandIcons = {
  },
  "runway-ml-max": {
   "title": "runway"
+ },
+ "api-tools": {
+  "title": "API tools"
+ },
+ "education-tools": {
+  "title": "Education tools"
+ },
+ "social-tools": {
+  "title": "Social tools"
  }
 };

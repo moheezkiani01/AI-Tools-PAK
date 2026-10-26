@@ -1,11 +1,13 @@
 import { useEffect, useState } from "react";
 import AdminGlyph from "./AdminGlyph";
-import { useProducts } from "../context/ProductContext";
+import { useProducts, useAllProducts } from "../context/ProductContext";
 import AdminProducts from "./AdminProducts";
 import AdminDiscounts from "./AdminDiscounts";
 import AdminPrices from "./AdminPrices";
 import AdminEditDetails from "./AdminEditDetails";
 import AdminOrders from "./AdminOrders";
+import AdminCatalogWorkspace from "./AdminCatalogWorkspace";
+import AdminErrorBoundary from "./AdminErrorBoundary";
 import AdminReviews from "./AdminReviews";
 import AdminPurchaseNumbers from "./AdminPurchaseNumbers";
 
@@ -17,15 +19,17 @@ const navigation = [
     { id: "reviews", name: "Reviews", icon: "star", caption: "Customer feedback" },
   ] },
   { title: "Catalogue", items: [
-    { id: "products", name: "Stock & availability", icon: "box", caption: "Product status" },
-    { id: "details", name: "Product details", icon: "edit", caption: "Content & plans" },
-    { id: "prices", name: "Edit prices", icon: "price", caption: "Regular prices" },
-    { id: "discounts", name: "Discounts", icon: "tag", caption: "Special offers" },
+    { id: "catalog", name: "All products", icon: "box", caption: "Manage original products and imported subscriptions together" },
+    { id: "trash", name: "Deleted items / Restore", icon: "refresh", caption: "Restore products removed from the public catalogue" },
+    { id: "products", name: "Stock & availability", icon: "box", caption: "Availability for every product" },
+    { id: "details", name: "Product details", icon: "edit", caption: "Content & plans across your catalogue" },
+    { id: "prices", name: "Edit prices", icon: "price", caption: "Legacy and imported prices" },
+    { id: "discounts", name: "Discounts", icon: "tag", caption: "Offers across the entire store" },
     { id: "purchases", name: "Purchase numbers", icon: "key", caption: "Review verification" },
   ] },
 ];
 const navItems = navigation.flatMap((group) => group.items);
-const headers = (password) => ({ "Content-Type": "application/json", "x-admin-password": password });
+const headers = (password) => ({ "Content-Type": "application/json", "x-admin-csrf": password });
 
 // Turns 0300 1234567 into 923001234567 so the WhatsApp link works
 const whatsappNumber = (value) => {
@@ -34,34 +38,61 @@ const whatsappNumber = (value) => {
 };
 
 export default function AdminPage() {
-  const [password, setPassword] = useState(() => sessionStorage.getItem("adminPassword") || "");
+  // `password` is now a short-lived CSRF token, not the administrator's password.
+  // The actual password only lives in this local sign-in input until submission.
+  const [password, setPassword] = useState('');
+  const [loginPassword, setLoginPassword] = useState('');
+  const [checkingSession, setCheckingSession] = useState(true);
   const [questions, setQuestions] = useState(null); // null = not logged in
   const [error, setError] = useState("");
   const [tab, setTab] = useState("waiting");
   const [questionSearch, setQuestionSearch] = useState("");
   const [stats, setStats] = useState(null);
+  const [catalogStats, setCatalogStats] = useState(null);
   const products = useProducts();
+  const allProducts = useAllProducts();
   const [view, setView] = useState("overview"); // all admin sections
+  const [detailSlug, setDetailSlug] = useState("");
   const [drafts, setDrafts] = useState({});
   const [faqModes, setFaqModes] = useState({});
   const [faqBusy, setFaqBusy] = useState(null);
   const [notes, setNotes] = useState({}); // error messages per question
   const [flash, setFlash] = useState(""); // "saved" message (the card moves to the Answered tab)
 
-  const load = async (pw = password) => {
-    setError("");
+  const load = async (csrf = password) => {
+    setError('');
     try {
-      const res = await fetch("/api/admin/questions", { headers: headers(pw) });
+      const res = await fetch('/api/admin/questions', { headers: headers(csrf), cache: 'no-store' });
       const body = await res.json().catch(() => null);
-      if (!res.ok) throw new Error(body?.error || "Could not reach the server. Is it running?");
-      sessionStorage.setItem("adminPassword", pw);
+      if (!res.ok) throw new Error(body?.error || 'Could not load customer questions.');
       setQuestions(body);
     } catch (err) {
       setError(err.message);
-      setQuestions(null);
+      if (/session expired|sign in again/i.test(err.message)) {setPassword('');setQuestions(null);}
     }
   };
-  useEffect(() => { if (password) load(); }, []);
+  const login = async () => {
+    setError('');
+    try {
+      const response = await fetch('/api/admin/login', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({password:loginPassword}) });
+      const result = await response.json().catch(() => ({}));
+      if(!response.ok || !result.csrfToken) throw new Error(result.error || 'Sign in failed.');
+      setLoginPassword('');
+      setPassword(result.csrfToken);
+      await load(result.csrfToken);
+    } catch(err) {setError(err.message);}
+  };
+  useEffect(() => {
+    // Clean up any raw password left in sessionStorage by the previous admin UI.
+    try { sessionStorage.removeItem('adminPassword'); } catch {}
+    let active=true;
+    fetch('/api/admin/session',{cache:'no-store'})
+      .then(async r => {if(!r.ok)return null;return r.json()})
+      .then(session => {if(active && session?.csrfToken){setPassword(session.csrfToken);load(session.csrfToken);}})
+      .catch(() => {})
+      .finally(() => {if(active)setCheckingSession(false)});
+    return () => {active=false};
+  }, []);
   useEffect(() => {
     if (view !== "overview" || !questions) return;
     let active = true;
@@ -73,13 +104,31 @@ export default function AdminPage() {
     return () => { active = false; };
   }, [view, questions]);
 
+  useEffect(() => {
+    if (view !== "overview" || !questions) return;
+    let active = true;
+    // The paginated catalogue query returns an exact count without loading
+    // every imported product or building a separate catalogue-health panel.
+    fetch("/api/admin/catalog?limit=1", { headers: headers(password), cache: "no-store" })
+      .then(r => { if (!r.ok) throw new Error("Catalog count unavailable"); return r.json(); })
+      .then(data => { if (active) setCatalogStats(Number.isSafeInteger(data.total) ? {total:data.total} : null); })
+      .catch(() => { if (active) setCatalogStats(null); });
+    return () => { active = false; };
+  }, [view, questions, password]);
+
   const send = async (q) => {
-    const answer = (drafts[q.id] ?? q.answer).trim();
-    const res = await fetch(`/api/admin/questions/${q.id}/answer`, { method: "POST", headers: headers(password), body: JSON.stringify({ answer }) });
-    const body = await res.json().catch(() => null);
-    if (!res.ok) return setNotes({ ...notes, [q.id]: body?.error || "Could not save." });
-    setFlash(body.emailed ? "Answer saved and emailed to the customer." : "Answer saved privately. You can add it to Customer FAQs, or the customer can publish it themselves.");
-    load();
+    const answer = (drafts[q.id] ?? q.answer ?? "").trim();
+    if (!answer) { setNotes((old) => ({ ...old, [q.id]: "Write an answer before saving." })); return; }
+    setNotes((old) => ({ ...old, [q.id]: "" }));
+    try {
+      const res = await fetch(`/api/admin/questions/${encodeURIComponent(q.id)}/answer`, {
+        method: "POST", headers: headers(password), body: JSON.stringify({ answer }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body?.error || "Could not save the answer.");
+      setFlash(body.emailed ? "Answer saved and emailed to the customer." : "Answer saved privately. You can add it to Customer FAQs, or the customer can publish it themselves.");
+      await load();
+    } catch (err) { setNotes((old) => ({ ...old, [q.id]: err.message })); }
   };
 
   const publishFaq = async (q, unpublish = false) => {
@@ -102,13 +151,22 @@ export default function AdminPage() {
 
   const remove = async (q) => {
     if (!confirm("Delete this question?")) return;
-    await fetch(`/api/admin/questions/${q.id}`, { method: "DELETE", headers: headers(password) });
-    load();
+    try {
+      const response = await fetch(`/api/admin/questions/${encodeURIComponent(q.id)}`, { method: "DELETE", headers: headers(password) });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body?.error || "Could not delete this question.");
+      setFlash("Question deleted.");
+      await load();
+    } catch (err) { setNotes((old) => ({ ...old, [q.id]: err.message })); }
   };
 
-  const logout = () => { sessionStorage.removeItem("adminPassword"); setPassword(""); setQuestions(null); setStats(null); };
+  const logout = async () => {
+    try {await fetch('/api/admin/logout', {method:'POST',headers:headers(password)});} catch {}
+    setPassword(''); setLoginPassword(''); setQuestions(null); setStats(null); setCatalogStats(null);
+  };
   const openView = (next) => { setView(next); window.scrollTo({ top: 0, behavior: "instant" }); };
 
+  if (checkingSession) return <main className="admin-login-shell" role="status" aria-live="polite"><div className="admin-login-card"><p>Checking your secure admin session…</p></div></main>;
   if (!questions) {
     return (
       <main className="admin-login-shell">
@@ -123,15 +181,15 @@ export default function AdminPage() {
             <span><AdminGlyph name="chat" /> Customer care</span>
           </div>
         </div>
-        <form onSubmit={(e) => { e.preventDefault(); load(); }} className="admin-login-card">
+        <form onSubmit={(e) => { e.preventDefault(); login(); }} className="admin-login-card">
           <span className="admin-icon-tile"><AdminGlyph name="key" size={23} /></span>
           <h2 className="mt-5 text-2xl font-extrabold">Admin sign in</h2>
           <p className="mt-2 text-sm text-[color:var(--text-3)]">Enter your store administrator password to continue.</p>
           <label className="mt-6 block text-sm font-semibold" htmlFor="admin-password">Admin password</label>
-          <input id="admin-password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Enter password" className="field mt-2" autoComplete="current-password" required />
+          <input id="admin-password" type="password" value={loginPassword} onChange={(e) => setLoginPassword(e.target.value)} placeholder="Enter password" className="field mt-2" autoComplete="current-password" required />
           <button type="submit" className="btn-primary mt-5 w-full">Open dashboard <AdminGlyph name="arrow" /></button>
           {error && <p role="alert" className="admin-notice-error mt-4">{error}</p>}
-          <p className="mt-5 text-xs text-[color:var(--text-3)]">Your session stays signed in only in this browser tab.</p>
+          <p className="mt-5 text-xs text-[color:var(--text-3)]">Your password is not saved in browser storage. The secure session expires automatically.</p>
         </form>
       </main>
     );
@@ -161,7 +219,7 @@ export default function AdminPage() {
         </div>
       </div>
       <div className="admin-frame">
-        <aside className="admin-sidebar" aria-label="Admin sections">
+        <aside className="admin-sidebar" aria-label="Admin sections" tabIndex={0}>
           <p className="admin-sidebar-title">WORKSPACE</p>
           {navigation.map((group) => (
             <div key={group.title} className="admin-nav-group">
@@ -197,6 +255,7 @@ export default function AdminPage() {
             {view === "questions" && <button type="button" className="admin-outline-button" onClick={() => load()}><AdminGlyph name="refresh" /> Refresh</button>}
           </header>
 
+          {error && <p role="alert" className="admin-notice-error mb-4">{error}</p>}
           {view === "overview" && (
             <div className="admin-overview space-y-6">
               <div className="admin-stat-grid">
@@ -204,7 +263,7 @@ export default function AdminPage() {
                   { name: "Total orders", number: stats?.total, icon: "receipt", note: "Recorded orders", target: "orders" },
                   { name: "Website orders", number: stats?.website, icon: "grid", note: "Online sales", target: "orders" },
                   { name: "Awaiting response", number: waiting.length, icon: "chat", note: "Customer questions", target: "questions" },
-                  { name: "Products", number: products.length, icon: "box", note: "Catalogue listings", target: "products" },
+                  { name: "Products", number: catalogStats ? allProducts.filter(p=>!p.imported).length + catalogStats.total : null, icon: "box", note: "Original + imported subscriptions", target: "catalog" },
                 ].map((item) => (
                   <button key={item.name} className="admin-stat" onClick={() => openView(item.target)} type="button">
                     <span className="admin-stat-top"><span className="admin-stat-icon"><AdminGlyph name={item.icon} size={20} /></span><AdminGlyph name="arrow" size={16} /></span>
@@ -221,6 +280,8 @@ export default function AdminPage() {
                 <div className="admin-quick-grid mt-5">
                   {[
                     { id: "orders", title: "Record an order", note: "Add a past or new sale", icon: "receipt" },
+                    { id: "catalog", title: "Manage entire catalogue", note: "Original + imported products", icon: "box" },
+                    { id: "trash", title: "Restore deleted products", note: "Open deleted items and restore a listing", icon: "refresh" },
                     { id: "details", title: "Edit product details", note: "Names, duration and features", icon: "edit" },
                     { id: "prices", title: "Update prices", note: "Change regular selling prices", icon: "price" },
                     { id: "discounts", title: "Create an offer", note: "Apply a discount to products", icon: "tag" },
@@ -283,13 +344,16 @@ export default function AdminPage() {
         ))}
       </ul>
           </div>
-          {view === "products" && <AdminProducts password={password} />}
-          {view === "discounts" && <AdminDiscounts password={password} />}
-          {view === "prices" && <AdminPrices password={password} />}
-          {view === "details" && <AdminEditDetails password={password} />}
+          <AdminErrorBoundary key={view}>
+          {["catalog", "trash", "products", "discounts", "prices"].includes(view) && <AdminCatalogWorkspace
+            mode={view === "products" ? "stock" : view} password={password}
+            onNavigate={openView}
+            onEdit={(slug) => { setDetailSlug(slug); openView("details"); }} />}
+          {view === "details" && <AdminEditDetails password={password} initialSlug={detailSlug} />}
           {view === "orders" && <AdminOrders password={password} />}
           {view === "reviews" && <AdminReviews password={password} />}
           {view === "purchases" && <AdminPurchaseNumbers password={password} />}
+          </AdminErrorBoundary>
         </div>
       </div>
     </main>

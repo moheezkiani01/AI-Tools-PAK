@@ -4,7 +4,7 @@ export default function OrdersChart() {
   const [stats, setStats] = useState(null);
   const [failed, setFailed] = useState(false);
   useEffect(() => {
-    fetch("/api/stats", { cache: "no-store" }).then((r) => {
+    fetch("/api/stats").then((r) => {
       if (!r.ok) throw new Error("Stats unavailable");
       return r.json();
     }).then(setStats).catch(() => setFailed(true));

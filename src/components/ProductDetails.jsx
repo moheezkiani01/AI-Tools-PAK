@@ -11,8 +11,10 @@ import { useDiscounts } from "../context/DiscountContext";
 import { orderOnWhatsApp, whatsappLink } from "../utils/whatsapp";
 import { useStock } from "../context/StockContext";
 import BrandIcon from "./BrandIcon";
+import { brandIconSlug } from "../utils/brandFor";
 
 import { brand, providerNotice } from "../config";
+import { readCachedProductVariant, fetchProductVariant } from "../utils/catalogVariantCache";
 
 function Section({ title, children }) {
   return (
@@ -25,11 +27,32 @@ function Section({ title, children }) {
 
 export default function ProductDetails({ slug }) {
   const products = useProducts();
-  const product = products.find((p) => p.slug === slug);
+  // Clicking an imported plan from its collection should render immediately
+  // using the public data we already fetched; the provider refreshes it later.
+  const cached = slug?.startsWith('import-') ? readCachedProductVariant(slug) : null;
+  const product = products.find((p) => p.slug === slug) || (cached ? {
+    slug: cached.slug, name: cached.name, description: cached.description,
+    brand: cached.brand, category: cached.category, duration: cached.variant,
+    price: cached.finalPrice, type: cached.productType,
+    unavailable: cached.unavailable, needsConfirmation: !!cached.needsConfirmation, restricted: !!cached.restricted,
+    imported: true,
+  } : null);
   const { addItem, setIsOpen } = useCartActions();
-  const out = useStock().isOut(slug);
+  const unavailable = useStock().isOut(slug);
   const { priceFor } = useDiscounts();
-  const [optionIndex, setOptionIndex] = useState(0);
+  const [optionIndex, setOptionIndex] = useState(() => {
+    const idx = Number(new URLSearchParams(window.location.search).get("plan"));
+    return Number.isInteger(idx) && idx >= 0 && idx < 100 ? idx : 0;
+  });
+  const [missing, setMissing] = useState(false);
+  useEffect(() => {
+    let active = true;
+    setMissing(false);
+    if (slug?.startsWith('import-') && !readCachedProductVariant(slug)) {
+      fetchProductVariant(slug).catch(() => { if (active) setMissing(true); });
+    }
+    return () => { active = false; };
+  }, [slug]);
   const [rating, setRating] = useState({ count: 0, average: 0 });
   useEffect(() => {
     let active = true;
@@ -48,10 +71,18 @@ export default function ProductDetails({ slug }) {
     return () => { document.title = oldTitle; meta?.setAttribute("content", oldDescription); };
   }, [product]);
 
+  if (!product && (!slug?.startsWith('import-') || missing)) {
+    return <p className="mx-auto max-w-3xl px-5 py-12 text-center">Product not found or unavailable. <a href="/products" className="underline">Browse products</a></p>;
+  }
   if (!product) {
-    return <p className="mx-auto max-w-3xl px-5 py-12 text-center">Product not found. <a href="/" className="underline">Back to shop</a></p>;
+    return <section className="mx-auto max-w-6xl px-5 py-10" role="status" aria-label="Loading product details">
+      <div className="glass animate-pulse p-7"><div className="h-8 w-2/3 rounded bg-[color:var(--surface-2)]"/>
+      <div className="mt-5 h-5 w-1/3 rounded bg-[color:var(--surface-2)]"/>
+      <div className="mt-6 h-36 rounded bg-[color:var(--surface-2)]"/></div>
+    </section>;
   }
 
+  const out = unavailable || !!product.unavailable;
   const category = allCategories.find((c) => c.slug === product.category);
   const group = compareGroups.find((g) => g.products.includes(slug));
   const option = product.options?.[optionIndex];
@@ -68,7 +99,7 @@ export default function ProductDetails({ slug }) {
       <div className="mt-6 grid gap-8 lg:grid-cols-[1fr_380px]">
         <div className="space-y-5">
           <div className="flex items-center gap-3">
-            <BrandIcon name={slug} category={product.category} size={72} />
+            <BrandIcon name={brandIconSlug(product.brand)||slug} category={product.category} size={72} />
             <span className="chip text-sm">{category.name}</span>
           </div>
           <h1 className="text-4xl font-extrabold sm:text-5xl">{product.name}</h1>
@@ -87,7 +118,7 @@ export default function ProductDetails({ slug }) {
             <p className="text-slate-400">Exact features are set by the provider and can change over time.</p>
           </Section>
           <Section title="Delivery Information">
-            <p>{product.delivery || "Delivery is within 10 minutes after your payment is confirmed. Access details are shared through WhatsApp or email."}</p>
+            <p>{product.delivery || "Delivery timing and activation depend on the selected plan. The seller will confirm the expected time and access method before you pay."}</p>
             <p>We confirm on WhatsApp how your access will be delivered before you pay.</p>
           </Section>
           <Section title="Terms & Conditions">
@@ -118,11 +149,12 @@ export default function ProductDetails({ slug }) {
           {onSale && <span className="inline-block rounded-full bg-rose-600 px-3 py-1 text-xs font-bold text-white">Special offer</span>}
           <p className="font-display text-4xl font-extrabold"><SalePrice original={original} price={price} /></p>
           {plan && <p className="text-sm text-slate-400">{plan}</p>}
-          {out ? (
-            <>
-              <p className="rounded-xl bg-amber-500/10 p-3 text-sm font-semibold text-amber-700 dark:text-amber-400">Currently out of stock</p>
-              <a href={whatsappLink(`Hello, is ${product.name} available?`)} target="_blank" rel="noreferrer" className="btn-ghost block w-full">Ask on WhatsApp</a>
-            </>
+          {product.imported && product.restricted && <p className="rounded-xl border border-amber-500/40 p-3 text-sm text-amber-600">This plan is listed for reference only while its resale and access terms are reviewed. It cannot be purchased. Never share your password or 2FA secrets.</p>}
+          {product.imported && product.needsConfirmation && !product.restricted && <p className="rounded-xl border border-amber-500/40 p-3 text-sm text-amber-600">Verify the plan's terms and eligibility before purchasing. Never share passwords or 2FA secrets.</p>}
+          {product.restricted ? (
+            <a href="/products" className="btn-ghost block w-full text-center">Browse other plans</a>
+          ) : out ? (
+            <a href={whatsappLink(`Hello, is ${product.name} available?`)} target="_blank" rel="noreferrer" className="btn-ghost block w-full">Ask on WhatsApp</a>
           ) : (
             <>
           <button onClick={buyNow} className="btn-primary w-full">Buy Now</button>
@@ -142,7 +174,7 @@ export default function ProductDetails({ slug }) {
           <p className="truncate text-xs text-slate-400">{plan || product.name}</p>
           <p className="break-words text-base font-extrabold min-[360px]:text-lg"><SalePrice original={original} price={price} /></p>
         </div>
-        {out ? <span className="chip shrink-0 px-2 py-2 text-xs min-[360px]:px-4 min-[360px]:text-sm">Out of stock</span> : <button onClick={buyNow} className="btn-primary shrink-0 px-4 min-[360px]:px-6">Buy Now</button>}
+        {out ? <a href={whatsappLink(`Hello, I have a question about ${product.name}.`)} className="btn-ghost shrink-0 px-3 py-2 text-sm">Ask about plan</a> : <button onClick={buyNow} className="btn-primary shrink-0 px-4 min-[360px]:px-6">Buy Now</button>}
       </div>
     </div>
   );

@@ -1,15 +1,22 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useProducts } from "../context/ProductContext";
 
-const headers = (password) => ({ "Content-Type": "application/json", "x-admin-password": password });
+const headers = (password) => ({ "Content-Type": "application/json", "x-admin-csrf": password });
 
 export default function AdminPurchaseNumbers({ password }) {
   const products = useProducts();
+  const [productSearch, setProductSearch] = useState("");
+  const filteredProducts = useMemo(() => products.filter(p => `${p.name} ${p.brand || ""}`.toLowerCase().includes(productSearch.toLowerCase())).slice(0, 150), [products, productSearch]);
   const [entries, setEntries] = useState([]);
   const [form, setForm] = useState({ slug: products[0]?.slug || "", orderReference: "" });
   const [newNumber, setNewNumber] = useState("");
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
+  // Imported products may arrive after the first render. Always keep a valid selection.
+  useEffect(() => {
+    if (products.length && !products.some(p => p.slug === form.slug))
+      setForm(old => ({ ...old, slug: products[0].slug }));
+  }, [products, form.slug]);
   const load = async () => {
     try {
       const res = await fetch("/api/admin/purchase-numbers", { headers: headers(password), cache: "no-store" });
@@ -49,9 +56,11 @@ export default function AdminPurchaseNumbers({ password }) {
       <div><h2 className="text-xl font-bold">Purchase numbers for reviews</h2>
         <p className="mt-2 text-sm text-slate-400">After a product is sold and payment is confirmed, generate a purchase number and share it privately with that customer. It only works for the selected product and can be used for one review.</p></div>
       <form onSubmit={create} className="glass space-y-4 p-5">
+        <label className="block text-sm">Search products<input className="field mt-1" type="search" placeholder="Search original or imported plans" value={productSearch} onChange={e=>setProductSearch(e.target.value)}/></label>
         <label className="block text-sm">Sold product
           <select className="field mt-1" required value={form.slug} onChange={(e) => setForm({ ...form, slug: e.target.value })}>
-            {products.map((product) => <option value={product.slug} key={product.slug}>{product.name}</option>)}
+            {products.find(p => p.slug===form.slug && !filteredProducts.some(q=>q.slug===form.slug)) && <option value={form.slug}>{products.find(p=>p.slug===form.slug)?.name}</option>}
+            {filteredProducts.map((product) => <option value={product.slug} key={product.slug}>{product.name}</option>)}
           </select>
         </label>
         <label className="block text-sm">Order reference (optional, admin only)

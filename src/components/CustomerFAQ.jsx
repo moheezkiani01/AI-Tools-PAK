@@ -6,7 +6,7 @@ export default function CustomerFAQ() {
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
   useEffect(() => {
-    fetch("/api/questions/public", { cache: "no-store" }).then((res) => res.json())
+    fetch("/api/questions/public").then((res) => res.json())
       .then((result) => setItems(Array.isArray(result) ? result : []))
       .catch(() => {}).finally(() => setLoading(false));
   }, []);

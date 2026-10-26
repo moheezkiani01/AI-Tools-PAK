@@ -1,22 +1,21 @@
-import BrandIcon from "./BrandIcon";
-import { useProducts } from "../context/ProductContext";
+import BrandIcon from './BrandIcon';
+import { sortCatalogGroups } from '../utils/catalogGroups';
 
-// Slow-scrolling row of every tool we sell (decorative)
-
-
-export default function LogoStrip() {
-  const products = useProducts();
-  const unique = products.filter((p, i, all) => all.findIndex((q) => q.name.split(" ")[0] === p.name.split(" ")[0]) === i);
-  return (
-    <div className="overflow-hidden border-y border-[color:var(--border)] bg-[color:var(--surface-2)]/60 py-3" aria-hidden="true">
-      <div className="marquee">
-        {[...unique, ...unique].map((p, i) => (
-          <span key={i} className="mx-6 flex items-center gap-3 whitespace-nowrap text-slate-300">
-            <BrandIcon name={p.slug} category={p.category} size={32} />
-            <span className="font-semibold">{p.name.split(" ")[0]}</span>
-          </span>
-        ))}
-      </div>
+// Moving brand strip uses the real combined catalogue, not a fixed mock list.
+// Duplicate items are visual only; the copy is hidden from assistive technologies.
+export default function LogoStrip({ catalogGroups = [] }) {
+  const featured = sortCatalogGroups(catalogGroups).slice(0, 14);
+  if (!featured.length) return null;
+  const items = (copy = false) => featured.map(group => <a key={`${copy ? 'copy-' : ''}${group.slug}`}
+    tabIndex={copy ? -1 : undefined} href={`/tool/${encodeURIComponent(group.slug)}`}
+    className="inline-flex shrink-0 items-center gap-2 whitespace-nowrap text-sm font-semibold text-slate-400 no-underline transition-colors hover:text-[color:var(--text)]">
+    <BrandIcon name={group.legacyProducts?.[0]?.slug || group.slug} brandName={group.brand} category={group.category} size={30}/>
+    <span>{group.brand}</span>
+  </a>);
+  return <div className="brand-marquee border-y border-[color:var(--border)] bg-[color:var(--surface-2)]/60 py-3" aria-label="Featured AI tool brands">
+    <div className="brand-marquee-track">
+      <div className="brand-marquee-set">{items()}</div>
+      <div className="brand-marquee-set" aria-hidden="true">{items(true)}</div>
     </div>
-  );
+  </div>;
 }

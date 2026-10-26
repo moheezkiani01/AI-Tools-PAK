@@ -1,50 +1,38 @@
-import Icon from "./Icon";
-import BrandIcon from "./BrandIcon";
-import { useProducts } from "../context/ProductContext";
-import SalePrice from "./SalePrice";
-import { useDiscounts } from "../context/DiscountContext";
-import { brandIcons } from "../data/brandIcons";
-import { logoFiles } from "../data/logoFiles";
+import Icon from './Icon';
+import BrandIcon from './BrandIcon';
+import { sortCatalogGroups } from '../utils/catalogGroups';
+import { formatPrice } from '../utils/formatPrice';
 
-export default function CategoryCard({ category, large = false, className = "" }) {
-  const products = useProducts();
-  const { hasDiscount, priceFor } = useDiscounts();
-  const items = products.filter((p) => category.slug === "discounts" ? hasDiscount(p.slug) : p.category === category.slug);
-  const topItems = [...items].sort((a, b) => Number(!!b.popular) - Number(!!a.popular));
-
-  // Logo row: one logo per brand (no repeats, no placeholder icons)
-  const seen = new Set();
-  const logos = items.filter((p) => {
-    const key = brandIcons[p.slug]?.title ?? (logoFiles[p.slug] ? p.slug : null);
-    if (!key || seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-
+// Keep the original category-led layout, but list each brand once with its plan count and starting price.
+export default function CategoryCard({ category, catalogGroups = [], large = false, className = '' }) {
+  const matching = sortCatalogGroups(catalogGroups.filter(g => category.slug === 'discounts' ? g.hasDiscount : g.category === category.slug));
+  const shown = matching.slice(0, 3);
   return (
-    <a href={`/${category.slug}`} style={{ "--c": category.color }} className={`glass card-hover card-wash group flex min-w-0 flex-col justify-between p-5 ${large ? "lg:p-7" : ""} ${className}`}>
-      <div>
-        <span className="tile" style={large ? { width: 60, height: 60 } : undefined}><Icon name={category.slug} size={large ? 28 : 22} /></span>
-        <h3 className={`mt-4 font-bold ${large ? "text-3xl lg:text-4xl" : "text-xl"}`}>{category.title}</h3>
-        <p className="mt-2 text-sm text-slate-400">{category.tools}</p>
-        {large && (
-          <ul className="mt-4 hidden space-y-2 lg:block">
-            {topItems.slice(0, 3).map((p) => (
-              <li key={p.slug} className="flex items-center gap-3 rounded-xl border border-[color:var(--border)] bg-[color:var(--surface-2)]/70 p-2.5">
-                <BrandIcon name={p.slug} category={p.category} size={34} />
-                <span className="flex-1 text-sm font-semibold">{p.name}</span>
-                <span className="text-sm font-bold"><SalePrice from={!!p.options} {...priceFor(p)} /></span>
-              </li>
-            ))}
-          </ul>
-        )}
+    <article style={{'--c':category.color}} className={`glass card-wash flex h-full min-w-0 flex-col p-4 sm:p-5 ${className}`}>
+      <a href={`/${category.slug}`} className="group inline-flex min-w-0 flex-col items-start no-underline">
+        <span className="tile"><Icon name={category.slug} size={22}/></span>
+        <h3 className={`mt-3 font-bold text-xl`}>{category.title}</h3>
+        <p className="mt-1 text-sm text-slate-400">{category.tools}</p>
+      </a>
+      <div className="mt-3 flex flex-1 flex-col gap-2">
+        {shown.map(group => (
+          <a key={group.slug} href={`/tool/${encodeURIComponent(group.slug)}`} className="flex min-w-0 items-center gap-3 rounded-xl border border-[color:var(--border)] bg-[color:var(--surface-2)] p-2.5 no-underline hover:border-[color:var(--border-strong)]">
+            <BrandIcon name={group.legacyProducts[0]?.slug || group.slug} brandName={group.brand} category={group.category} size={38}/>
+            <span className="min-w-0 flex-1">
+              <span className="block truncate text-sm font-bold">{group.brand}</span>
+              <span className="block text-xs text-slate-400">{group.count} plan{group.count===1?'':'s'}</span>
+            </span>
+            <span className="shrink-0 text-right">
+              <span className="block text-[10px] text-slate-400">{group.priceIsEnquiryOnly ? "Listed" : "From"}</span>
+              <span className="block text-xs font-bold sm:text-sm">{formatPrice(group.minPrice)}</span>
+            </span>
+          </a>
+        ))}
+        {!shown.length && <span className="text-sm text-slate-400">Browse available tools in this category.</span>}
       </div>
-      <div className="mt-5 flex items-center justify-between gap-3">
-        <span className="flex min-w-0 -space-x-2 overflow-hidden">
-          {logos.slice(0, large ? 6 : 4).map((p) => <span key={p.slug} className="rounded-xl ring-2 ring-[color:var(--surface)]"><BrandIcon name={p.slug} category={p.category} size={large ? 40 : 32} /></span>)}
-        </span>
-        <span className="shrink-0 whitespace-nowrap text-sm font-semibold transition group-hover:translate-x-1" style={{ color: category.color }}>{items.length} products →</span>
-      </div>
-    </a>
+      <a href={`/${category.slug}`} className="mt-3 flex items-center justify-between gap-2 border-t border-[color:var(--border)] pt-3 text-sm font-semibold no-underline" style={{color:category.color}}>
+        <span>Explore {matching.length} tool{matching.length===1?'':'s'}</span><span aria-hidden="true">→</span>
+      </a>
+    </article>
   );
 }

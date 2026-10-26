@@ -11,7 +11,9 @@ test('extra cursor ring, trail, and bubbles are not loaded', () => {
   assert.equal(existsSync(new URL('../src/components/CursorEffects.jsx', import.meta.url)), false);
 });
 
-test('existing non-cursor hover animations remain in place', () => {
-  assert.match(app, /initMouseEffects/);
-  assert.match(styles, /\.depth-1/);
+test('decorative animations can run without reinstating mouse-driven effects', () => {
+  assert.doesNotMatch(app, /initMouseEffects|IntersectionObserver\(\(entries\) => entries\.forEach/);
+  assert.match(styles, /@media \(prefers-reduced-motion: reduce\)/);
+  assert.match(styles, /brand-marquee-loop/);
+  assert.match(styles, /\.card-hover\.is-hovered/);
 });

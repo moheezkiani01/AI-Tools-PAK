@@ -1,12 +1,15 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 const today = () => new Date(Date.now() + 5 * 3600000).toISOString().slice(0, 10);
-const headers = (password) => ({ "Content-Type": "application/json", "x-admin-password": password });
+const headers = (password) => ({ "Content-Type": "application/json", "x-admin-csrf": password });
 const format = (n) => Number(n || 0).toLocaleString("en-US");
 
 export default function AdminOrders({ password }) {
   const [entries, setEntries] = useState([]);
+  const [orderSearch, setOrderSearch] = useState("");
+  const [orderStatus, setOrderStatus] = useState("All");
   const [websiteOrders, setWebsiteOrders] = useState([]);
+  const visibleOrders = useMemo(() => websiteOrders.filter(o => (orderStatus==="All" || (o.status||"Pending")===orderStatus) && `${o.number} ${o.customer?.name||""} ${o.customer?.email||""} ${(o.items||[]).map(i=>i.name).join(" ")}`.toLowerCase().includes(orderSearch.toLowerCase())), [websiteOrders,orderSearch,orderStatus]);
   const [stats, setStats] = useState(null);
   const [form, setForm] = useState({ date: today(), count: 1, source: "WhatsApp", note: "" });
   const [message, setMessage] = useState("");
@@ -70,8 +73,9 @@ export default function AdminOrders({ password }) {
       <section className="space-y-3">
         <h2 className="text-xl font-bold">Website checkout orders</h2>
         <p className="text-sm text-slate-400">Latest 200 orders saved by customers at checkout. These records stay in the cloud database, not GitHub.</p>
-        {websiteOrders.length === 0 ? <p className="text-sm text-slate-400">No website checkout orders yet.</p> : (
-          <div className="space-y-3">{websiteOrders.map((order) => (
+        <div className="mb-4 grid gap-3 sm:grid-cols-2"><label className="text-sm">Search orders<input className="field mt-1" value={orderSearch} onChange={e=>setOrderSearch(e.target.value)} placeholder="Order number, customer, item" /></label><label className="text-sm">Status<select className="field mt-1" value={orderStatus} onChange={e=>setOrderStatus(e.target.value)}>{["All","Pending","Completed","Cancelled"].map(s=><option key={s}>{s}</option>)}</select></label></div>
+        {visibleOrders.length === 0 ? <p className="text-sm text-slate-400">No website orders match these filters.</p> : (
+          <div className="space-y-3">{visibleOrders.map((order) => (
             <div key={order.number} className="glass p-4 space-y-2">
               <div className="flex flex-wrap justify-between gap-2">
                 <strong>{order.number}</strong>

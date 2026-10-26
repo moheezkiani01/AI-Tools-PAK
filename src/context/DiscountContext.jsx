@@ -11,7 +11,7 @@ export function DiscountProvider({ children }) {
     let active = true;
     const refresh = async () => {
       try {
-        const res = await fetch("/api/discounts", { cache: "no-store" });
+        const res = await fetch("/api/discounts");
         if (!res.ok) throw new Error("Discount prices unavailable");
         const data = await res.json();
         if (active) {
@@ -22,7 +22,7 @@ export function DiscountProvider({ children }) {
       } catch { if (active) setReady(false); }
     };
     refresh();
-    const timer = setInterval(refresh, 30000);
+    const timer = setInterval(refresh, 120000);
     const visible = () => { if (document.visibilityState === "visible") refresh(); };
     document.addEventListener("visibilitychange", visible);
     window.addEventListener("discounts-updated", refresh);
@@ -31,7 +31,7 @@ export function DiscountProvider({ children }) {
   }, []);
   const value = useMemo(() => ({ discounts, prices, ready,
     hasDiscount: (slug) => !!discounts[slug],
-    priceFor: (product, option) => priceInfo(product, discounts, option, prices),
+    priceFor: (product, option) => product.imported ? { price: product.price, original: product.price, onSale: false } : priceInfo(product, discounts, option, prices),
   }), [discounts, prices, ready]);
   return <DiscountContext.Provider value={value}>{children}</DiscountContext.Provider>;
 }

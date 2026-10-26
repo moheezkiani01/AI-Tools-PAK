@@ -4,16 +4,17 @@ import { formatPrice } from "../utils/formatPrice";
 import { useDiscounts } from "../context/DiscountContext";
 import { priceInfo, regularPrice } from "../utils/discounts";
 
-const auth = (password) => ({ "Content-Type": "application/json", "x-admin-password": password });
-export default function AdminPrices({ password }) {
-  const products = useProducts();
+const auth = (password) => ({ "Content-Type": "application/json", "x-admin-csrf": password });
+export default function AdminPrices({ password, openImports, initialSlug = "", compact = false }) {
+  const products = useProducts().filter(p => !p.imported);
   const { discounts } = useDiscounts();
-  const [slug, setSlug] = useState(products[0].slug);
+  const [slug, setSlug] = useState(initialSlug || products[0]?.slug || "");
   const [savedPrices, setSavedPrices] = useState({});
   const [draft, setDraft] = useState({});
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const product = products.find((p) => p.slug === slug);
+  useEffect(() => { if (initialSlug) setSlug(initialSlug); }, [initialSlug]);
   const hasEditedPrice = !!savedPrices[slug];
 
   const refresh = async () => {
@@ -53,7 +54,11 @@ export default function AdminPrices({ password }) {
   const previewPrice = valid && product && priceInfo(product, discounts,
     null, { [slug]: product.options?.length ? { options: Object.fromEntries(product.options.map((o) => [o.key || o.label, Number(draft[o.key || o.label])])) } : { price: Number(draft.price) } });
 
-  return <div className="mt-6 space-y-5">
+  return <div className={compact ? "space-y-3" : "mt-6 space-y-5"}>
+    {!compact && <div className="glass flex flex-wrap items-center justify-between gap-3 p-4" role="note">
+      <p className="max-w-2xl text-sm">Imported subscriptions have their own price overrides. Use Product details or Imported catalog to edit their PKR prices.</p>
+      <button type="button" className="btn-ghost" onClick={openImports}>Manage imported products</button>
+    </div>}
     <div className="glass space-y-4 p-5">
       <h2 className="text-xl font-bold">Edit regular product prices</h2>
       <p className="text-sm text-slate-400">Change the actual regular selling price, without changing the discount percentage or rupees-off offer. Prices update across product pages, cart and checkout. Existing paid orders keep their recorded totals.</p>

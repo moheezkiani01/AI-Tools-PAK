@@ -7,7 +7,7 @@ test("Category cards lead directly into the tool finder with compact spacing", (
   const finder = read("components/ToolFinder.jsx");
   assert.match(app, /id="categories" className="[^"]*pb-4/);
   assert.match(finder, /id="finder" className="[^"]*pt-5/);
-  assert.match(app, /lg:grid-cols-4/);
+  assert.match(app, /sm:grid-cols-2 xl:grid-cols-3/);
 });
 test("Home sections no longer have oversized vertical padding", () => {
   for (const file of ["App.jsx", "components/ToolFinder.jsx", "components/ProductGrid.jsx", "components/HowItWorks.jsx", "components/OrdersChart.jsx", "components/WhyChoose.jsx", "components/FAQ.jsx", "components/Contact.jsx"]) {
