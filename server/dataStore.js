@@ -13,11 +13,13 @@ export class StoreError extends Error {
 }
 
 const isVercel = () => Boolean(process.env.VERCEL);
+const isCloudflare = () => Boolean(process.env.CLOUDFLARE_WORKER);
+const isHosted = () => isVercel() || isCloudflare();
 const hasSupabase = () => Boolean(process.env.SUPABASE_URL && process.env.SUPABASE_SECRET_KEY);
 const storageReady = () => {
   const oneProvided = Boolean(process.env.SUPABASE_URL) !== Boolean(process.env.SUPABASE_SECRET_KEY);
-  if (oneProvided || (isVercel() && !hasSupabase())) {
-    throw new StoreError("Supabase is not configured. Set SUPABASE_URL and SUPABASE_SECRET_KEY in Vercel and redeploy.");
+  if (oneProvided || (isHosted() && !hasSupabase())) {
+    throw new StoreError("Supabase is not configured. Set SUPABASE_URL and SUPABASE_SECRET_KEY in your hosting environment and redeploy.");
   }
   if (hasSupabase() && !/^https:\/\/[a-z0-9-]+\.supabase\.co\/?$/i.test(process.env.SUPABASE_URL)) {
     throw new StoreError("SUPABASE_URL must be your project's https://PROJECT.supabase.co URL.");
@@ -139,4 +141,4 @@ export async function adminFailureCount(ipHash, failed = false) {
   return result;
 }
 
-export const databaseMode = () => (hasSupabase() ? "supabase" : isVercel() ? "not-configured" : "local-json");
+export const databaseMode = () => (hasSupabase() ? "supabase" : isHosted() ? "not-configured" : "local-json");

@@ -19,7 +19,7 @@ import { usingOrderTable, placeDedicatedOrder, dedicatedOrderSummary, listDedica
 
 // Settings come from server/.env (copy .env.example to .env and fill it in)
 const envFile = new URL("./.env", import.meta.url);
-if (fs.existsSync(envFile)) {
+if (!process.env.CLOUDFLARE_WORKER && fs.existsSync(envFile)) {
   for (const line of fs.readFileSync(envFile, "utf8").split(/\r?\n/)) {
     const match = line.match(/^\s*([A-Z_]+)\s*=\s*(.*?)\s*$/);
     if (match && !(match[1] in process.env)) process.env[match[1]] = match[2].replace(/^["']|["']$/g, "");
@@ -948,7 +948,7 @@ api.post("/api/orders", async (req, res) => {
 // In production this one server also serves the built website (after "npm run build")
 const dist = fileURLToPath(new URL("../dist/", import.meta.url));
 app.use("/api", (req, res) => res.status(404).json({ error: "API endpoint not found." }));
-if (!process.env.VERCEL && fs.existsSync(dist)) {
+if (!process.env.VERCEL && !process.env.CLOUDFLARE_WORKER && fs.existsSync(dist)) {
   app.use("/assets", express.static(path.join(dist, "assets"), { maxAge: "1y", immutable: true })); // file names change when content changes
   app.use(express.static(dist, { redirect: false, index: false, maxAge: "1d" }));
   // Each URL has its own pre-rendered file (dist/product/gemini-pro/index.html). Unknown URLs get a real 404 status.
@@ -1005,7 +1005,7 @@ app.use((err, req, res, next) => {
 });
 
 export default app;
-if (!process.env.VERCEL && process.env.NODE_ENV !== "test") {
+if (!process.env.VERCEL && !process.env.CLOUDFLARE_WORKER && process.env.NODE_ENV !== "test") {
   const port = process.env.PORT || 5000;
   app.listen(port, () => console.log(`Server running on http://localhost:${port}`));
 }
